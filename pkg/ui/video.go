@@ -54,7 +54,8 @@ func (r *videoRenderer) Destroy() {}
 
 // MinSize implements [fyne.WidgetRenderer].
 func (r *videoRenderer) MinSize() fyne.Size {
-	return r.v.image.MinSize()
+	// Esnure the widget always asks for atleast 320x240
+	return fyne.NewSize(320, 240)
 }
 
 // Objects implements [fyne.WidgetRenderer].

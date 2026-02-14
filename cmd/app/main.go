@@ -2,15 +2,14 @@ package main
 
 import (
 	"fmt"
-	"image/color"
 	"time"
 
 	"github.com/intothevoid/nayan/pkg/camera"
 	"github.com/intothevoid/nayan/pkg/ui"
+	"github.com/intothevoid/nayan/pkg/vision"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 )
 
@@ -30,35 +29,45 @@ func main() {
 
 	// 3. Create a placeholder for the video feed
 	// We create a blank image initially
-	vidWidget := ui.NewVideoDisplay()
+	mainDisplay := ui.NewVideoDisplay()
+	debugDisplay := ui.NewVideoDisplay()
+
+	// Create splitView container
+	splitView := container.NewHSplit(mainDisplay, debugDisplay)
+	splitView.Offset = 0.7
 
 	// 4. The Background Loop (Goroutine)
 	go func() {
 		for {
-			// A. Get the newest frame
-			frame, err := stream.Read()
-			if err != nil {
-				fmt.Println("Error reading frame:", err)
-				time.Sleep(time.Second) // Wait a bit before retrying
+			// A. Get the newest raw frame
+			mat, err := stream.ReadRaw()
+			if err != nil || mat.Empty() {
 				continue
 			}
 
-			// B. Update the UI widget in a thread safe way
-			vidWidget.UpdateFrame(frame)
+			// B. Prepare the original image for the UI
+			origImg, _ := mat.ToImage()
+			mainDisplay.UpdateFrame(origImg)
 
-			// Optional: Cap the frame rate to save CPU (approx 30 FPS)
+			// C. Process the image for the debug UI
+			processedMat := vision.Preprocess(*mat)
+			if processedMat.Empty() || processedMat.Rows() == 0 {
+				fmt.Println("Warning: processedMat is empty!")
+			}
+			debugImg, _ := processedMat.ToImage()
+			debugDisplay.UpdateFrame(debugImg)
+
+			// D. Cleanup
+			processedMat.Close()
+
+			// E. Cap the frame rate to save CPU (approx 30 FPS)
 			time.Sleep(time.Millisecond * 33)
 		}
 	}()
 
 	// 5. Layout and Run
 	// We put the image inside a container with a background
-	content := container.NewMax(
-		canvas.NewRectangle(color.Black), // Dark background
-		vidWidget,
-	)
-
-	window.SetContent(content)
-	window.Resize(fyne.NewSize(800, 600))
+	window.SetContent(splitView)
+	window.Resize(fyne.NewSize(1280, 960))
 	window.ShowAndRun()
 }

@@ -51,6 +51,14 @@ func (vs *VideoStream) Read() (image.Image, error) {
 	return img, nil
 }
 
+// ReadRaw reads the current frame as a gocv.Mat
+func (vs *VideoStream) ReadRaw() (*gocv.Mat, error) {
+	if !vs.webcam.Read(vs.frame) {
+		return nil, fmt.Errorf("cannot read frame")
+	}
+	return vs.frame, nil
+}
+
 func (vs *VideoStream) Close() {
 	vs.webcam.Close()
 	vs.frame.Close()
