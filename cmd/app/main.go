@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/intothevoid/nayan/pkg/camera"
+	"github.com/intothevoid/nayan/pkg/ui"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -16,7 +17,7 @@ import (
 func main() {
 	// 1. Setup the Fyne UI App
 	myApp := app.New()
-	window := myApp.NewWindow("Nayan - AI Chess Companion")
+	window := myApp.NewWindow("Nayan - OpenCV Chess Companion")
 
 	// 2. Initialize the Camera
 	// 0 is usually the default webcam
@@ -29,8 +30,7 @@ func main() {
 
 	// 3. Create a placeholder for the video feed
 	// We create a blank image initially
-	imgWidget := canvas.NewImageFromImage(nil)
-	imgWidget.FillMode = canvas.ImageFillOriginal
+	vidWidget := ui.NewVideoDisplay()
 
 	// 4. The Background Loop (Goroutine)
 	go func() {
@@ -43,11 +43,8 @@ func main() {
 				continue
 			}
 
-			// B. Update the UI widget
-			imgWidget.Image = frame
-
-			// C. Tell Fyne to redraw this specific widget
-			imgWidget.Refresh()
+			// B. Update the UI widget in a thread safe way
+			vidWidget.UpdateFrame(frame)
 
 			// Optional: Cap the frame rate to save CPU (approx 30 FPS)
 			time.Sleep(time.Millisecond * 33)
@@ -58,7 +55,7 @@ func main() {
 	// We put the image inside a container with a background
 	content := container.NewMax(
 		canvas.NewRectangle(color.Black), // Dark background
-		imgWidget,
+		vidWidget,
 	)
 
 	window.SetContent(content)
