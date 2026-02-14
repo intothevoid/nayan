@@ -33,10 +33,9 @@ func NewVideoDisplay() *VideoDisplay {
 func (v *VideoDisplay) UpdateFrame(img image.Image) {
 	v.mu.Lock()
 	v.image.Image = img
-	v.image.Refresh()
 	v.mu.Unlock()
 
-	// Ask Fyne to redraw image
+	// Ask Fyne to queue redraw image on the main UI thread
 	v.Refresh()
 }
 
@@ -66,8 +65,10 @@ func (r *videoRenderer) Objects() []fyne.CanvasObject {
 // Refresh implements [fyne.WidgetRenderer].
 func (r *videoRenderer) Refresh() {
 	r.v.mu.Lock()
-	defer r.v.mu.Unlock()
-	r.v.image.Refresh()
+	fyne.Do(func() {
+		r.v.image.Refresh()
+	})
+	r.v.mu.Unlock()
 }
 
 func (r *videoRenderer) Layout(s fyne.Size) {
