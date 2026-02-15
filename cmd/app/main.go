@@ -67,6 +67,13 @@ func main() {
 				// Draw circles on the original mat if corners found
 				// Draw once per frame
 				if len(corners) == 4 {
+					// Warp original frame to get a top down view
+					warpedMat := vision.WarpBoard(*mat, corners)
+
+					// Convert to image for debug display
+					warpedImg, _ := warpedMat.ToImage()
+					debugDisplay.UpdateFrame(warpedImg)
+
 					for _, pt := range corners {
 						// Params: mat, centre, radius, color (green), thickness
 						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 3)
@@ -74,8 +81,8 @@ func main() {
 				}
 
 				// Update the debug display with the edge map
-				debugImg, _ := processedMat.ToImage()
-				debugDisplay.UpdateFrame(debugImg)
+				// debugImg, _ := processedMat.ToImage()
+				// debugDisplay.UpdateFrame(debugImg)
 			}
 
 			// Update the original display, green circles included
