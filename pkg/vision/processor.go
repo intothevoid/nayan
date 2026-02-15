@@ -53,3 +53,32 @@ func Preprocess(input gocv.Mat) gocv.Mat {
 
 	return edges
 }
+
+func DetectBoard(edges gocv.Mat) []image.Point {
+	// Find all contours
+	contours := gocv.FindContours(edges, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours.Close() // memory clean up
+
+	var boardPoints []image.Point
+	maxArea := 0.0
+
+	// Identify the largest contour
+	for i := 0; i < contours.Size(); i++ {
+		cnt := contours.At(i)
+		area := gocv.ContourArea(cnt)
+		if area > maxArea {
+			// Check if this shape can be simplfied into 4 points
+			// ArcLength helps determine the precision of the approximation
+			peri := gocv.ArcLength(cnt, true)
+			approx := gocv.ApproxPolyDP(cnt, 0.02*peri, true)
+
+			// Check if 4 sided polygon found
+			if !approx.IsNil() && approx.Size() == 4 {
+				maxArea = area
+				boardPoints = approx.ToPoints()
+			}
+			approx.Close()
+		}
+	}
+	return boardPoints
+}
