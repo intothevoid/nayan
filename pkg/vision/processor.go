@@ -42,16 +42,30 @@ func Preprocess(input gocv.Mat) gocv.Mat {
 	edges := gocv.NewMat()
 	gocv.Canny(blurred, &edges, 50, 150)
 
-	// Final check before returning
+	// check edges
 	if edges.Empty() {
 		fmt.Println("Vision Error: Edges Mat is empty after Canny")
+	}
+
+	// create a 3x3 kernel
+	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(3, 3))
+	defer kernel.Close()
+
+	// dilate edges to close small gaps
+	dilated := gocv.NewMat()
+	gocv.Dilate(edges, &dilated, kernel)
+
+	// check dilated
+	if dilated.Empty() {
+		fmt.Println("Vision Error: Dilated Mat is empty after Dilation")
 	}
 
 	// clean up intermediate mats
 	grey.Close()
 	blurred.Close()
+	edges.Close()
 
-	return edges
+	return dilated
 }
 
 func DetectBoard(edges gocv.Mat) []image.Point {
@@ -62,11 +76,15 @@ func DetectBoard(edges gocv.Mat) []image.Point {
 	var boardPoints []image.Point
 	maxArea := 0.0
 
+	// Get total area of image
+	totalArea := float64(edges.Rows() * edges.Cols())
+	minBoardArea := totalArea * 0.30 // 30% threshold
+
 	// Identify the largest contour
 	for i := 0; i < contours.Size(); i++ {
 		cnt := contours.At(i)
 		area := gocv.ContourArea(cnt)
-		if area > maxArea {
+		if area > maxArea && area > minBoardArea {
 			// Check if this shape can be simplfied into 4 points
 			// ArcLength helps determine the precision of the approximation
 			peri := gocv.ArcLength(cnt, true)

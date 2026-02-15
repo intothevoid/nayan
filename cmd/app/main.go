@@ -65,9 +65,12 @@ func main() {
 				corners := vision.DetectBoard(processedMat)
 
 				// Draw circles on the original mat if corners found
-				for _, pt := range corners {
-					// Params: mat, centre, radius, color (green), thickness
-					gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 3)
+				// Draw once per frame
+				if len(corners) == 4 {
+					for _, pt := range corners {
+						// Params: mat, centre, radius, color (green), thickness
+						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 3)
+					}
 				}
 
 				// Update the debug display with the edge map
