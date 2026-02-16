@@ -71,47 +71,55 @@ func Preprocess(input gocv.Mat) gocv.Mat {
 }
 
 // DetectBoard detects the largest contour in the board and ensures it is a square (4 points)
+// DetectBoard detects the largest 4-cornered shape in the image
 func DetectBoard(edges gocv.Mat) []image.Point {
-	// Find all contours
+	// 1. Find contours
 	contours := gocv.FindContours(edges, gocv.RetrievalExternal, gocv.ChainApproxSimple)
-	defer contours.Close() // memory clean up
+	defer contours.Close()
 
-	var boardPoints []image.Point
+	var bestQuad []image.Point
 	maxArea := 0.0
 
-	// Get total area of image
-	totalArea := float64(edges.Rows() * edges.Cols())
-	minBoardArea := totalArea * 0.30 // 30% threshold
+	// 2. Filter Area: Don't look at shapes smaller than 10% of the screen
+	minArea := float64(edges.Rows()*edges.Cols()) * 0.10
 
-	// Identify the largest contour
 	for i := 0; i < contours.Size(); i++ {
 		cnt := contours.At(i)
 		area := gocv.ContourArea(cnt)
-		if area > maxArea && area > minBoardArea {
-			// Check if this shape can be simplfied into 4 points
-			// ArcLength helps determine the precision of the approximation
-			peri := gocv.ArcLength(cnt, true)
-			approx := gocv.ApproxPolyDP(cnt, 0.04*peri, true)
 
-			// Check if 4 sided polygon found
-			if !approx.IsNil() && approx.Size() == 4 {
-				// Check if sides are relatively equal (within 15% tolerance)
-				side1 := DistanceBetweenPoints(approx.At(0), approx.At(1))
-				side2 := DistanceBetweenPoints(approx.At(1), approx.At(2))
-				side3 := DistanceBetweenPoints(approx.At(2), approx.At(3))
-				side4 := DistanceBetweenPoints(approx.At(3), approx.At(0))
+		// Optimization: Skip small contours early
+		if area < minArea {
+			continue
+		}
 
-				// A simple way to check if it's "roughly" a square/rectangle:
-				// Compare opposite sides (side1 vs side3) and (side2 vs side4)
-				if math.Abs(side1-side3)/side1 < 0.30 && math.Abs(side2-side4)/side2 < 0.30 {
+		// 3. Approximation: Using 2% (0.02) helps capture the outer frame better
+		// than 4%, which might round off the corners too much.
+		peri := gocv.ArcLength(cnt, true)
+		approx := gocv.ApproxPolyDP(cnt, 0.02*peri, true)
+
+		// 4. Geometry Check: Must have exactly 4 corners
+		if !approx.IsNil() && approx.Size() == 4 {
+			points := approx.ToPoints()
+
+			// 5. Squareness Check: Compare Diagonals
+			// Calculate diagonal distances (TopLeft-BottomRight vs TopRight-BottomLeft)
+			d1 := DistanceBetweenPoints(points[0], points[2])
+			d2 := DistanceBetweenPoints(points[1], points[3])
+
+			// If diagonals are within 25% of each other, it's a valid square/rectangle
+			if math.Abs(d1-d2)/d1 < 0.25 {
+				// 6. "King of the Hill" Logic
+				// We keep the LARGEST valid square we find.
+				// This ensures we prefer the outer wood frame over the inner notation border.
+				if area > maxArea {
 					maxArea = area
-					boardPoints = approx.ToPoints()
+					bestQuad = points
 				}
 			}
-			approx.Close()
 		}
+		approx.Close()
 	}
-	return boardPoints
+	return bestQuad
 }
 
 // ReorderPoints reorders the points in order tl, tr, br, bl
@@ -223,11 +231,22 @@ func (s *BoardSmoother) Smooth(newCorners []image.Point) []image.Point {
 		return newCorners
 	}
 
+	sortedNew := ReorderPoints(newCorners)
+	const maxJump = 50.0 // 50 pixels threshold for sudden unexpected jumps
+
 	smoothed := make([]image.Point, 4)
 	for i := 0; i < 4; i++ {
-		// Lerp formula: current + (target - current) * alpha
-		smoothed[i].X = int(float64(s.LastCorners[i].X) + float64(newCorners[i].X-s.LastCorners[i].X)*s.Alpha)
-		smoothed[i].Y = int(float64(s.LastCorners[i].Y) + float64(newCorners[i].Y-s.LastCorners[i].Y)*s.Alpha)
+		// Calculate how far the corner moved
+		movement := DistanceBetweenPoints(s.LastCorners[i], sortedNew[i])
+
+		if movement > maxJump {
+			// We jumped too far, use the last position
+			smoothed[i] = s.LastCorners[i]
+		} else {
+			// Lerp formula: current + (target - current) * alpha
+			smoothed[i].X = int(float64(s.LastCorners[i].X) + float64(sortedNew[i].X-s.LastCorners[i].X)*s.Alpha)
+			smoothed[i].Y = int(float64(s.LastCorners[i].Y) + float64(sortedNew[i].Y-s.LastCorners[i].Y)*s.Alpha)
+		}
 	}
 	s.LastCorners = smoothed
 	return smoothed
