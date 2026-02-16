@@ -43,6 +43,8 @@ func main() {
 	splitView := container.NewHSplit(mainDisplay, debugDisplay)
 	splitView.Offset = 0.7
 
+	smoother := vision.NewBoardSmoother(0.3)
+
 	// 4. The Background Loop (Goroutine)
 	go func() {
 		for {
@@ -61,14 +63,15 @@ func main() {
 			if processedMat.Empty() || processedMat.Rows() == 0 {
 				fmt.Println("Warning: processedMat is empty!")
 			} else {
-				// Try to find the 4 corners
-				corners := vision.DetectBoard(processedMat)
+				// Try to find the 4 rawCorners
+				rawCorners := vision.DetectBoard(processedMat)
+				stableCorners := smoother.Smooth(rawCorners)
 
 				// Draw circles on the original mat if corners found
 				// Draw once per frame
-				if len(corners) == 4 {
+				if len(stableCorners) == 4 {
 					// Warp original frame to get a top down view
-					warpedMat := vision.WarpBoard(*mat, corners)
+					warpedMat := vision.WarpBoard(*mat, stableCorners)
 
 					// Draw the grid on the warped mat
 					vision.DrawGrid(&warpedMat)
@@ -77,17 +80,18 @@ func main() {
 					warpedImg, _ := warpedMat.ToImage()
 					debugDisplay.UpdateFrame(warpedImg)
 
-					for _, pt := range corners {
+					// Draw circles on the original mat for the main view
+					for _, pt := range stableCorners {
 						// Params: mat, centre, radius, color (green), thickness
-						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 3)
+						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 2)
 					}
 
 					warpedMat.Close()
+				} else {
+					// If no board is found yet, show the edge map so we can troubleshoot
+					debugImg, _ := processedMat.ToImage()
+					debugDisplay.UpdateFrame(debugImg)
 				}
-
-				// Update the debug display with the edge map
-				// debugImg, _ := processedMat.ToImage()
-				// debugDisplay.UpdateFrame(debugImg)
 			}
 
 			// Update the original display, green circles included

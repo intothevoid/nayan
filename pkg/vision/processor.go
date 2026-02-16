@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 
 	"gocv.io/x/gocv"
 )
@@ -31,7 +32,7 @@ func Preprocess(input gocv.Mat) gocv.Mat {
 
 	// gaussian blur to reduce noise (5x5 kernel)
 	blurred := gocv.NewMat()
-	gocv.GaussianBlur(input, &blurred, image.Pt(5, 5), 0, 0, gocv.BorderDefault)
+	gocv.GaussianBlur(grey, &blurred, image.Pt(5, 5), 0, 0, gocv.BorderDefault)
 
 	if blurred.Empty() {
 		fmt.Println("Vision Error: Blurred Mat is empty")
@@ -94,8 +95,18 @@ func DetectBoard(edges gocv.Mat) []image.Point {
 
 			// Check if 4 sided polygon found
 			if !approx.IsNil() && approx.Size() == 4 {
-				maxArea = area
-				boardPoints = approx.ToPoints()
+				// Check if sides are relatively equal (within 15% tolerance)
+				side1 := DistanceBetweenPoints(approx.At(0), approx.At(1))
+				side2 := DistanceBetweenPoints(approx.At(1), approx.At(2))
+				side3 := DistanceBetweenPoints(approx.At(2), approx.At(3))
+				side4 := DistanceBetweenPoints(approx.At(3), approx.At(0))
+
+				// A simple way to check if it's "roughly" a square/rectangle:
+				// Compare opposite sides (side1 vs side3) and (side2 vs side4)
+				if math.Abs(side1-side3)/side1 < 0.30 && math.Abs(side2-side4)/side2 < 0.30 {
+					maxArea = area
+					boardPoints = approx.ToPoints()
+				}
 			}
 			approx.Close()
 		}
@@ -187,4 +198,37 @@ func DrawGrid(img *gocv.Mat) {
 		// Horizontal lines
 		gocv.Line(img, image.Pt(0, pos), image.Pt(800, pos), white, 1)
 	}
+}
+
+// BoardSmoother is a struct to encapsulate corner smoothing
+type BoardSmoother struct {
+	LastCorners []image.Point
+	Alpha       float64 // Smoothing factor (0.1 = very smooth, 0.9 = very reactive)
+}
+
+// NewBoardSmoother creates a new instance of the board smoother
+func NewBoardSmoother(alpha float64) *BoardSmoother {
+	return &BoardSmoother{Alpha: alpha}
+}
+
+// Smooth smooths out jitter from the boards corners due to lighting, noise variations
+func (s *BoardSmoother) Smooth(newCorners []image.Point) []image.Point {
+	if len(newCorners) != 4 {
+		return s.LastCorners
+	}
+
+	// If its our first detection, accept it
+	if len(s.LastCorners) != 4 {
+		s.LastCorners = newCorners
+		return newCorners
+	}
+
+	smoothed := make([]image.Point, 4)
+	for i := 0; i < 4; i++ {
+		// Lerp formula: current + (target - current) * alpha
+		smoothed[i].X = int(float64(s.LastCorners[i].X) + float64(newCorners[i].X-s.LastCorners[i].X)*s.Alpha)
+		smoothed[i].Y = int(float64(s.LastCorners[i].Y) + float64(newCorners[i].Y-s.LastCorners[i].Y)*s.Alpha)
+	}
+	s.LastCorners = smoothed
+	return smoothed
 }
