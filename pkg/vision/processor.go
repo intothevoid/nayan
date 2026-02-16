@@ -182,100 +182,17 @@ func WarpBoard(input gocv.Mat, corners []image.Point) gocv.Mat {
 	return warped
 }
 
-// DetectInnerBoard finds the inner playing area within a warped board image.
-// It looks for the strong edges between the wooden border and the squares using
-// line detection. Falls back to a configurable inset ratio if lines aren't found.
-func DetectInnerBoard(warped gocv.Mat, fallbackInsetRatio float64) image.Rectangle {
+// DetectInnerBoard returns the rectangle of the inner playing area within
+// a warped board image. Uses a fixed inset ratio — since the outer frame
+// detection is consistent, the border width is a predictable fraction of
+// the warped image size.
+//
+// insetRatio is the fraction of the image taken up by the border on each side.
+// For a typical wooden board with notation labels, 0.06–0.10 works well.
+func DetectInnerBoard(warped gocv.Mat, insetRatio float64) image.Rectangle {
 	size := warped.Rows() // should be 800
-
-	// Convert to grayscale and detect edges
-	grey := toGrey(warped)
-	defer grey.Close()
-
-	blurred := gocv.NewMat()
-	defer blurred.Close()
-	gocv.GaussianBlur(grey, &blurred, image.Pt(5, 5), 0, 0, gocv.BorderDefault)
-
-	edges := gocv.NewMat()
-	defer edges.Close()
-	gocv.Canny(blurred, &edges, 50, 150)
-
-	// Use HoughLinesP to find line segments
-	lines := gocv.NewMat()
-	defer lines.Close()
-	// params: rho=1px, theta=pi/180, threshold=100, minLineLength=200, maxLineGap=20
-	gocv.HoughLinesPWithParams(edges, &lines, 1, math.Pi/180, 100, 200, 20)
-
-	// Collect horizontal and vertical line positions
-	// We want the innermost lines near each edge (the border-to-squares boundary)
-	var hLines []int // Y positions of horizontal lines
-	var vLines []int // X positions of vertical lines
-
-	for i := 0; i < lines.Rows(); i++ {
-		x1 := int(lines.GetVeciAt(i, 0)[0])
-		y1 := int(lines.GetVeciAt(i, 0)[1])
-		x2 := int(lines.GetVeciAt(i, 0)[2])
-		y2 := int(lines.GetVeciAt(i, 0)[3])
-
-		dx := math.Abs(float64(x2 - x1))
-		dy := math.Abs(float64(y2 - y1))
-
-		// Horizontal line: small vertical change, spans a good width
-		if dy < 10 && dx > 150 {
-			avgY := (y1 + y2) / 2
-			hLines = append(hLines, avgY)
-		}
-		// Vertical line: small horizontal change, spans a good height
-		if dx < 10 && dy > 150 {
-			avgX := (x1 + x2) / 2
-			vLines = append(vLines, avgX)
-		}
-	}
-
-	mid := size / 2 // 400
-
-	// Find the innermost border lines (closest to center from each edge)
-	top := findClosestToCenter(hLines, mid, true)  // largest Y that is < mid and in the top region
-	bottom := findClosestToCenter(hLines, mid, false)
-	left := findClosestToCenter(vLines, mid, true)
-	right := findClosestToCenter(vLines, mid, false)
-
-	// Validate: lines should be in the border region (outer 5%-20% of each edge)
-	minBorder := int(float64(size) * 0.03)
-	maxBorder := int(float64(size) * 0.20)
-
-	valid := top >= minBorder && top <= maxBorder &&
-		(size-bottom) >= minBorder && (size-bottom) <= maxBorder &&
-		left >= minBorder && left <= maxBorder &&
-		(size-right) >= minBorder && (size-right) <= maxBorder
-
-	if valid {
-		return image.Rect(left, top, right, bottom)
-	}
-
-	// Fallback: use the configured inset ratio
-	inset := int(float64(size) * fallbackInsetRatio)
+	inset := int(float64(size) * insetRatio)
 	return image.Rect(inset, inset, size-inset, size-inset)
-}
-
-// findClosestToCenter finds the line position closest to the center from one side.
-// If fromLow is true, searches for lines below center (in the "top" or "left" border region).
-func findClosestToCenter(positions []int, center int, fromLow bool) int {
-	best := -1
-	for _, pos := range positions {
-		if fromLow {
-			// Looking for the highest position that's still below center (top/left border edge)
-			if pos < center && (best == -1 || pos > best) {
-				best = pos
-			}
-		} else {
-			// Looking for the lowest position that's still above center (bottom/right border edge)
-			if pos > center && (best == -1 || pos < best) {
-				best = pos
-			}
-		}
-	}
-	return best
 }
 
 // CropAndRewarp extracts the inner playing area from a warped board image

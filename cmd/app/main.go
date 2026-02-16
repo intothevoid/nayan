@@ -73,9 +73,9 @@ func main() {
 					// Stage 1: Warp by outer frame corners
 					outerWarp := vision.WarpBoard(*mat, stableCorners)
 
-					// Stage 2: Detect inner playing area and crop to just the 64 squares.
-					// fallbackInsetRatio 0.08 = 8% border on each side (adjust if your board border differs)
-					innerRect := vision.DetectInnerBoard(outerWarp, 0.08)
+					// Stage 2: Crop to just the 64 squares by removing the wooden border.
+					// insetRatio 0.07 = 7% border on each side (adjust if your board border differs)
+					innerRect := vision.DetectInnerBoard(outerWarp, 0.01)
 					warpedMat := vision.CropAndRewarp(outerWarp, innerRect)
 					outerWarp.Close()
 
