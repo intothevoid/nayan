@@ -3,6 +3,7 @@ package vision
 import (
 	"fmt"
 	"image"
+	"image/color"
 
 	"gocv.io/x/gocv"
 )
@@ -172,4 +173,18 @@ func WarpBoard(input gocv.Mat, corners []image.Point) gocv.Mat {
 	gocv.WarpPerspective(input, &warped, m, image.Pt(800, 800))
 
 	return warped
+}
+
+// DrawGrid draws an 8x8 grid across the board
+func DrawGrid(img *gocv.Mat) {
+	white := color.RGBA{255, 255, 255, 0}
+
+	for i := 1; i < 9; i++ {
+		// Vertical lines
+		pos := i * 100
+		gocv.Line(img, image.Pt(pos, 0), image.Pt(pos, 800), white, 1)
+
+		// Horizontal lines
+		gocv.Line(img, image.Pt(0, pos), image.Pt(800, pos), white, 1)
+	}
 }
