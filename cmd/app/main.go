@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 )
 
 const (
@@ -39,11 +40,26 @@ func main() {
 	mainDisplay := ui.NewVideoDisplay()
 	debugDisplay := ui.NewVideoDisplay()
 
+	// Text occupancy display panel
+	occupancyLabel := widget.NewLabel("Waiting for calibration...")
+	occupancyLabel.TextStyle = fyne.TextStyle{Monospace: true}
+
+	// Right panel: debug view on top, text occupancy below
+	rightPanel := container.NewVSplit(debugDisplay, occupancyLabel)
+	rightPanel.Offset = 0.7
+
 	// Create splitView container
-	splitView := container.NewHSplit(mainDisplay, debugDisplay)
-	splitView.Offset = 0.7
+	splitView := container.NewHSplit(mainDisplay, rightPanel)
+	splitView.Offset = 0.6
 
 	smoother := vision.NewBoardSmoother(0.3)
+
+	// Calibration state: capture empty board as reference after stable detection
+	var referenceBoard gocv.Mat
+	calibrated := false
+	var boardDetectedSince time.Time
+	boardStable := false
+	var lastOccupancy [8][8]bool
 
 	// 4. The Background Loop (Goroutine)
 	go func() {
@@ -74,10 +90,40 @@ func main() {
 					outerWarp := vision.WarpBoard(*mat, stableCorners)
 
 					// Stage 2: Crop to just the 64 squares by removing the wooden border.
-					// insetRatio 0.07 = 7% border on each side (adjust if your board border differs)
 					innerRect := vision.DetectInnerBoard(outerWarp, 0.01)
 					warpedMat := vision.CropAndRewarp(outerWarp, innerRect)
 					outerWarp.Close()
+
+					// Calibration: after board detected stably for 3 seconds, capture reference
+					if !calibrated {
+						if !boardStable {
+							boardDetectedSince = time.Now()
+							boardStable = true
+						} else if time.Since(boardDetectedSince) >= 3*time.Second {
+							referenceBoard = warpedMat.Clone()
+							calibrated = true
+							fmt.Println("Calibration complete — reference board captured")
+							fyne.Do(func() {
+								occupancyLabel.SetText("Calibration complete\n\nPlace pieces on the board...")
+							})
+						}
+					}
+
+					// If calibrated, scan for occupancy and draw overlays
+					if calibrated {
+						occupancy := vision.ScanBoard(warpedMat, referenceBoard)
+						vision.DrawOccupancy(&warpedMat, occupancy)
+
+						// Update UI and console only when state changes
+						if occupancy != lastOccupancy {
+							vision.PrintOccupancy(occupancy)
+							text := vision.FormatOccupancy(occupancy)
+							fyne.Do(func() {
+								occupancyLabel.SetText(text)
+							})
+							lastOccupancy = occupancy
+						}
+					}
 
 					// Draw the grid on the inner-cropped warped mat
 					vision.DrawGrid(&warpedMat)
@@ -93,6 +139,9 @@ func main() {
 
 					warpedMat.Close()
 				} else {
+					// Board lost — reset stability timer
+					boardStable = false
+
 					// If no board is found yet, show the edge map so we can troubleshoot
 					debugImg, _ := processedMat.ToImage()
 					debugDisplay.UpdateFrame(debugImg)

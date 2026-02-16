@@ -1,7 +1,9 @@
 package vision
 
 import (
+	"fmt"
 	"image"
+	"image/color"
 
 	"gocv.io/x/gocv"
 )
@@ -36,4 +38,61 @@ func GetSquare(warped gocv.Mat, col, row int) gocv.Mat {
 
 	// Return a Region of Interest (ROI)
 	return warped.Region(rect)
+}
+
+// ScanBoard compares every square of the live warped board against the
+// reference (empty board) and returns an 8x8 occupancy grid.
+// true = occupied, false = empty.
+func ScanBoard(live, reference gocv.Mat) [8][8]bool {
+	var occupancy [8][8]bool
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			liveSq := GetSquare(live, col, row)
+			refSq := GetSquare(reference, col, row)
+			occupied, _ := IsSquareOccupied(liveSq, refSq)
+			occupancy[row][col] = occupied
+		}
+	}
+	return occupancy
+}
+
+// DrawOccupancy draws a semi-transparent green rectangle on each occupied square.
+func DrawOccupancy(img *gocv.Mat, occupancy [8][8]bool) {
+	green := color.RGBA{0, 200, 0, 0}
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			if occupancy[row][col] {
+				x := col * 100
+				y := row * 100
+				pt1 := image.Pt(x+5, y+5)
+				pt2 := image.Pt(x+95, y+95)
+				gocv.Rectangle(img, image.Rectangle{Min: pt1, Max: pt2}, green, 3)
+			}
+		}
+	}
+}
+
+// FormatOccupancy returns a text representation of the occupancy grid.
+// 'X' = occupied, '.' = empty. Columns are a-h, rows are 8-1.
+func FormatOccupancy(occupancy [8][8]bool) string {
+	var s string
+	s += "  a b c d e f g h\n"
+	for row := 0; row < 8; row++ {
+		s += fmt.Sprintf("%d ", 8-row)
+		for col := 0; col < 8; col++ {
+			if occupancy[row][col] {
+				s += "X "
+			} else {
+				s += ". "
+			}
+		}
+		s += "\n"
+	}
+	return s
+}
+
+// PrintOccupancy prints the occupancy grid to stdout.
+func PrintOccupancy(occupancy [8][8]bool) {
+	fmt.Print(FormatOccupancy(occupancy))
+	fmt.Println()
 }
