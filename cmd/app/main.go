@@ -70,10 +70,16 @@ func main() {
 				// Draw circles on the original mat if corners found
 				// Draw once per frame
 				if len(stableCorners) == 4 {
-					// Warp original frame to get a top down view
-					warpedMat := vision.WarpBoard(*mat, stableCorners)
+					// Stage 1: Warp by outer frame corners
+					outerWarp := vision.WarpBoard(*mat, stableCorners)
 
-					// Draw the grid on the warped mat
+					// Stage 2: Detect inner playing area and crop to just the 64 squares.
+					// fallbackInsetRatio 0.08 = 8% border on each side (adjust if your board border differs)
+					innerRect := vision.DetectInnerBoard(outerWarp, 0.08)
+					warpedMat := vision.CropAndRewarp(outerWarp, innerRect)
+					outerWarp.Close()
+
+					// Draw the grid on the inner-cropped warped mat
 					vision.DrawGrid(&warpedMat)
 
 					// Convert to image for debug display
@@ -82,7 +88,6 @@ func main() {
 
 					// Draw circles on the original mat for the main view
 					for _, pt := range stableCorners {
-						// Params: mat, centre, radius, color (green), thickness
 						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 2)
 					}
 
