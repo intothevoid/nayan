@@ -70,6 +70,9 @@ func main() {
 					// Warp original frame to get a top down view
 					warpedMat := vision.WarpBoard(*mat, corners)
 
+					// Draw the grid on the warped mat
+					vision.DrawGrid(&warpedMat)
+
 					// Convert to image for debug display
 					warpedImg, _ := warpedMat.ToImage()
 					debugDisplay.UpdateFrame(warpedImg)
@@ -78,6 +81,8 @@ func main() {
 						// Params: mat, centre, radius, color (green), thickness
 						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 3)
 					}
+
+					warpedMat.Close()
 				}
 
 				// Update the debug display with the edge map
