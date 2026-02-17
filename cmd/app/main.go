@@ -206,6 +206,9 @@ func main() {
 			if err != nil || mat.Empty() {
 				continue
 			}
+
+			// Mirror the camera feed horizontally so it feels natural
+			gocv.Flip(*mat, mat, -1)
 			frameCount++
 
 			if frameCount == 1 {
