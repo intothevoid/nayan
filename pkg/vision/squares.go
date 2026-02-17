@@ -8,7 +8,8 @@ import (
 	"gocv.io/x/gocv"
 )
 
-// IsSquareOccupied compares the live square to a reference square
+// IsSquareOccupied compares the live square to a reference square.
+// Both Mats should be the same size (the center crop from GetSquare).
 func IsSquareOccupied(live, ref gocv.Mat) (bool, float64) {
 	diff := gocv.NewMat()
 	defer diff.Close()
@@ -21,22 +22,29 @@ func IsSquareOccupied(live, ref gocv.Mat) (bool, float64) {
 	gocv.Threshold(diff, &diff, 40, 255, gocv.ThresholdBinary)
 
 	// 3. Count non-zero pixels (white pixels = change)
+	totalPixels := float64(diff.Rows() * diff.Cols())
 	changedPixels := gocv.CountNonZero(diff)
-	percentage := (float64(changedPixels) / 10000.0) * 100
+	percentage := (float64(changedPixels) / totalPixels) * 100
 
-	// If > 5% of the square changed, something is there
-	return percentage > 5.0, percentage
+	// 8% threshold — higher than before because the center crop concentrates
+	// the signal (piece base) while excluding edge spillover from neighbours
+	return percentage > 8.0, percentage
 }
 
-// GetSquare extracts a 100x100 region based on chess coordinates (0-7)
-// col: 0=a, 4=e | row: 0=8, 7=1 (OpenCV Y starts from top)
-func GetSquare(warped gocv.Mat, col, row int) gocv.Mat {
-	// Calculate the rectangle for the square
-	x := col * 100
-	y := row * 100
-	rect := image.Rect(x, y, x+100, y+100)
+// squareInset is the number of pixels to crop from each edge of a 100x100
+// square. This extracts only the center region where the piece base sits,
+// avoiding bleed from neighbouring squares caused by piece height + perspective.
+const squareInset = 20
 
-	// Return a Region of Interest (ROI)
+// GetSquare extracts the center region of a square based on chess coordinates (0-7).
+// col: 0=a, 4=e | row: 0=8, 7=1 (OpenCV Y starts from top).
+// Returns a 60x60 ROI (100 - 2*20 inset) to reduce neighbour bleed.
+func GetSquare(warped gocv.Mat, col, row int) gocv.Mat {
+	x := col*100 + squareInset
+	y := row*100 + squareInset
+	size := 100 - 2*squareInset
+	rect := image.Rect(x, y, x+size, y+size)
+
 	return warped.Region(rect)
 }
 
