@@ -13,7 +13,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 )
 
 const (
@@ -27,34 +26,33 @@ func main() {
 	window := myApp.NewWindow("Nayan - OpenCV Chess Companion")
 
 	// 2. Initialize the Camera
-	// 0 is usually the default webcam
 	stream, err := camera.NewVideoStream(DEVICE_ID_WEBCAM)
 	if err != nil {
 		panic(fmt.Sprintf("Could not open camera: %v", err))
 	}
-	// Ensure we tidy up when the app closes
 	defer stream.Close()
 
-	// 3. Create a placeholder for the video feed
-	// We create a blank image initially
-	mainDisplay := ui.NewVideoDisplay()
-	debugDisplay := ui.NewVideoDisplay()
+	// 3. Create display widgets
+	mainDisplay := ui.NewVideoDisplay()   // Camera feed (left)
+	greyDisplay := ui.NewVideoDisplay()   // Greyscale debug view
+	edgesDisplay := ui.NewVideoDisplay()  // Edge map debug view
+	warpedDisplay := ui.NewVideoDisplay() // Warped board debug view
+	boardWidget := ui.NewBoardWidget()    // Virtual chessboard status bar
 
-	// Text occupancy display panel
-	occupancyLabel := widget.NewLabel("Waiting for calibration...")
-	occupancyLabel.TextStyle = fyne.TextStyle{Monospace: true}
+	// Right panel: 3 stacked debug views
+	rightGrid := container.NewGridWithRows(3, greyDisplay, edgesDisplay, warpedDisplay)
 
-	// Right panel: debug view on top, text occupancy below
-	rightPanel := container.NewVSplit(debugDisplay, occupancyLabel)
-	rightPanel.Offset = 0.7
+	// Top area: camera on left, debug views on right
+	topSplit := container.NewHSplit(mainDisplay, rightGrid)
+	topSplit.Offset = 0.6
 
-	// Create splitView container
-	splitView := container.NewHSplit(mainDisplay, rightPanel)
-	splitView.Offset = 0.6
+	// Overall: top area above, virtual chessboard below
+	mainLayout := container.NewVSplit(topSplit, boardWidget)
+	mainLayout.Offset = 0.75
 
 	smoother := vision.NewBoardSmoother(0.3)
 
-	// Calibration state: capture empty board as reference after stable detection
+	// Calibration state
 	var referenceBoard gocv.Mat
 	calibrated := false
 	var boardDetectedSince time.Time
@@ -64,32 +62,32 @@ func main() {
 	// 4. The Background Loop (Goroutine)
 	go func() {
 		for {
-			// Get the newest raw frame
 			mat, err := stream.ReadRaw()
 			if err != nil || mat.Empty() {
 				continue
 			}
 
-			// Process the image for the debug view
-			// We clone the mat here to ensure the Preprocess doesn't affect our main display
+			// Run preprocessing and get intermediate stages for debug views
 			tempMat := mat.Clone()
-			processedMat := vision.Preprocess(tempMat)
+			stages := vision.PreprocessStages(tempMat)
 			tempMat.Close()
 
-			if processedMat.Empty() || processedMat.Rows() == 0 {
-				fmt.Println("Warning: processedMat is empty!")
-			} else {
-				// Try to find the 4 rawCorners
-				rawCorners := vision.DetectBoard(processedMat)
+			// Always update grey and edges debug views
+			greyImg, _ := stages.Grey.ToImage()
+			greyDisplay.UpdateFrame(greyImg)
+
+			edgesImg, _ := stages.Edges.ToImage()
+			edgesDisplay.UpdateFrame(edgesImg)
+
+			if !stages.Edges.Empty() && stages.Edges.Rows() > 0 {
+				rawCorners := vision.DetectBoard(stages.Edges)
 				stableCorners := smoother.Smooth(rawCorners)
 
-				// Draw circles on the original mat if corners found
-				// Draw once per frame
 				if len(stableCorners) == 4 {
 					// Stage 1: Warp by outer frame corners
 					outerWarp := vision.WarpBoard(*mat, stableCorners)
 
-					// Stage 2: Crop to just the 64 squares by removing the wooden border.
+					// Stage 2: Crop to just the 64 squares
 					innerRect := vision.DetectInnerBoard(outerWarp, 0.01)
 					warpedMat := vision.CropAndRewarp(outerWarp, innerRect)
 					outerWarp.Close()
@@ -103,36 +101,27 @@ func main() {
 							referenceBoard = warpedMat.Clone()
 							calibrated = true
 							fmt.Println("Calibration complete — reference board captured")
-							fyne.Do(func() {
-								occupancyLabel.SetText("Calibration complete\n\nPlace pieces on the board...")
-							})
 						}
 					}
 
-					// If calibrated, scan for occupancy and draw overlays
+					// If calibrated, scan for occupancy and update board widget
 					if calibrated {
 						occupancy := vision.ScanBoard(warpedMat, referenceBoard)
 						vision.DrawOccupancy(&warpedMat, occupancy)
 
-						// Update UI and console only when state changes
 						if occupancy != lastOccupancy {
 							vision.PrintOccupancy(occupancy)
-							text := vision.FormatOccupancy(occupancy)
-							fyne.Do(func() {
-								occupancyLabel.SetText(text)
-							})
+							boardWidget.UpdateOccupancy(occupancy)
 							lastOccupancy = occupancy
 						}
 					}
 
-					// Draw the grid on the inner-cropped warped mat
+					// Draw the grid on the warped mat and update debug view
 					vision.DrawGrid(&warpedMat)
-
-					// Convert to image for debug display
 					warpedImg, _ := warpedMat.ToImage()
-					debugDisplay.UpdateFrame(warpedImg)
+					warpedDisplay.UpdateFrame(warpedImg)
 
-					// Draw circles on the original mat for the main view
+					// Draw corner circles on the original mat
 					for _, pt := range stableCorners {
 						gocv.Circle(mat, pt, 10, color.RGBA{0, 255, 0, 0}, 2)
 					}
@@ -141,28 +130,24 @@ func main() {
 				} else {
 					// Board lost — reset stability timer
 					boardStable = false
-
-					// If no board is found yet, show the edge map so we can troubleshoot
-					debugImg, _ := processedMat.ToImage()
-					debugDisplay.UpdateFrame(debugImg)
 				}
 			}
 
-			// Update the original display, green circles included
+			// Update the main camera display
 			origImg, _ := mat.ToImage()
 			mainDisplay.UpdateFrame(origImg)
 
-			// Cleanup
-			processedMat.Close()
+			// Cleanup intermediate Mats
+			stages.Grey.Close()
+			stages.Edges.Close()
 
-			// Cap the frame rate to save CPU (approx 30 FPS)
+			// Cap the frame rate (~30 FPS)
 			time.Sleep(time.Millisecond * 33)
 		}
 	}()
 
 	// 5. Layout and Run
-	// We put the image inside a container with a background
-	window.SetContent(splitView)
+	window.SetContent(mainLayout)
 	window.Resize(fyne.NewSize(1280, 960))
 	window.ShowAndRun()
 }

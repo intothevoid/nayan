@@ -20,6 +20,44 @@ func toGrey(input gocv.Mat) gocv.Mat {
 	return grey
 }
 
+// PreprocessResult holds intermediate preprocessing stages for debug visualisation.
+// Caller is responsible for closing both Mats.
+type PreprocessResult struct {
+	Grey  gocv.Mat
+	Edges gocv.Mat
+}
+
+// PreprocessStages runs the same pipeline as Preprocess but returns both the
+// greyscale and final edge Mat so they can be displayed as debug views.
+func PreprocessStages(input gocv.Mat) PreprocessResult {
+	if input.Empty() {
+		fmt.Println("Vision Error: Input Mat is empty")
+		return PreprocessResult{Grey: gocv.NewMat(), Edges: gocv.NewMat()}
+	}
+
+	grey := toGrey(input)
+	if grey.Empty() {
+		fmt.Println("Vision Error: Grey Mat is empty")
+		return PreprocessResult{Grey: grey, Edges: gocv.NewMat()}
+	}
+
+	blurred := gocv.NewMat()
+	gocv.GaussianBlur(grey, &blurred, image.Pt(7, 7), 0, 0, gocv.BorderDefault)
+
+	edges := gocv.NewMat()
+	gocv.Canny(blurred, &edges, 50, 150)
+	blurred.Close()
+
+	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(5, 5))
+	defer kernel.Close()
+
+	closed := gocv.NewMat()
+	gocv.MorphologyEx(edges, &closed, gocv.MorphClose, kernel)
+	edges.Close()
+
+	return PreprocessResult{Grey: grey, Edges: closed}
+}
+
 // Preprocess converts the raw frame into an edge map optimised for board outline detection.
 // Uses Canny edge detection with a larger blur (7x7) to suppress internal board textures,
 // then morphological closing (dilate→erode) to seal gaps in the board outline while
