@@ -25,7 +25,7 @@ func NewVideoDisplay() *VideoDisplay {
 
 	// Create the internal canvas image
 	v.image = canvas.NewImageFromImage(nil)
-	v.image.FillMode = canvas.ImageFillOriginal
+	v.image.FillMode = canvas.ImageFillContain
 	return v
 }
 
@@ -54,8 +54,7 @@ func (r *videoRenderer) Destroy() {}
 
 // MinSize implements [fyne.WidgetRenderer].
 func (r *videoRenderer) MinSize() fyne.Size {
-	// Esnure the widget always asks for atleast 320x240
-	return fyne.NewSize(320, 240)
+	return fyne.NewSize(100, 75)
 }
 
 // Objects implements [fyne.WidgetRenderer].

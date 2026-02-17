@@ -104,7 +104,7 @@ type boardRenderer struct {
 func (r *boardRenderer) Destroy() {}
 
 func (r *boardRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(280, 280)
+	return fyne.NewSize(100, 100)
 }
 
 func (r *boardRenderer) Objects() []fyne.CanvasObject {
@@ -118,7 +118,7 @@ func (r *boardRenderer) Refresh() {
 func (r *boardRenderer) Layout(size fyne.Size) {
 	labelMargin := float32(16)
 
-	// Available space for the board (square)
+	// Available space for the board (square, fit within panel)
 	boardW := size.Width - labelMargin
 	boardH := size.Height - labelMargin
 	boardSize := boardW
@@ -127,8 +127,12 @@ func (r *boardRenderer) Layout(size fyne.Size) {
 	}
 
 	sqSize := boardSize / 8
-	offsetX := labelMargin
-	offsetY := float32(0)
+
+	// Center the board within the available space
+	totalBoardW := sqSize*8 + labelMargin
+	totalBoardH := sqSize*8 + labelMargin
+	offsetX := labelMargin + (size.Width-totalBoardW)/2
+	offsetY := (size.Height - totalBoardH) / 2
 
 	r.b.root.Resize(size)
 
