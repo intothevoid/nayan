@@ -104,6 +104,70 @@ func ScanBoard(live, reference gocv.Mat) [8][8]bool {
 	return occupancy
 }
 
+// Detection thresholds for ScanBoardAbsolute.
+const (
+	// absVarianceThreshold is the minimum greyscale stddev to consider occupied.
+	// Catches dark pieces on light squares and most high-contrast cases.
+	absVarianceThreshold = 22.0
+
+	// absEdgeThreshold is the minimum percentage of edge pixels in a square
+	// ROI to consider occupied. Catches light pieces on light squares where
+	// variance is low but the piece's 3D shape still produces edges.
+	absEdgeThreshold = 4.0
+)
+
+// ScanBoardAbsolute detects occupied squares without a reference board using
+// two complementary signals:
+//  1. Greyscale variance (stddev) — pieces produce texture/shadows
+//  2. Canny edge density — pieces have 3D shape with edges regardless of contrast
+//
+// A square is marked occupied if EITHER signal exceeds its threshold.
+func ScanBoardAbsolute(warped gocv.Mat) [8][8]bool {
+	var occupancy [8][8]bool
+
+	// Prepare greyscale for variance analysis
+	grey := gocv.NewMat()
+	defer grey.Close()
+	gocv.CvtColor(warped, &grey, gocv.ColorBGRToGray)
+
+	// Prepare edge map for edge density analysis
+	blurred := gocv.NewMat()
+	defer blurred.Close()
+	gocv.GaussianBlur(grey, &blurred, image.Pt(5, 5), 0, 0, gocv.BorderDefault)
+
+	edges := gocv.NewMat()
+	defer edges.Close()
+	gocv.Canny(blurred, &edges, 30, 100)
+
+	mean := gocv.NewMat()
+	defer mean.Close()
+	stddev := gocv.NewMat()
+	defer stddev.Close()
+
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			// Variance check
+			roiGrey := GetSquare(grey, col, row)
+			gocv.MeanStdDev(roiGrey, &mean, &stddev)
+			sd := stddev.GetDoubleAt(0, 0)
+			roiGrey.Close()
+
+			// Edge density check
+			roiEdge := GetSquare(edges, col, row)
+			totalPixels := float64(roiEdge.Rows() * roiEdge.Cols())
+			edgePixels := float64(gocv.CountNonZero(roiEdge))
+			edgePct := (edgePixels / totalPixels) * 100
+			roiEdge.Close()
+
+			if sd > absVarianceThreshold || edgePct > absEdgeThreshold {
+				occupancy[row][col] = true
+			}
+		}
+	}
+
+	return occupancy
+}
+
 // DrawOccupancy draws a semi-transparent green rectangle on each occupied square.
 func DrawOccupancy(img *gocv.Mat, occupancy [8][8]bool) {
 	green := color.RGBA{0, 200, 0, 0}

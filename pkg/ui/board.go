@@ -36,7 +36,8 @@ func NewBoardWidget() *BoardWidget {
 	b.ExtendBaseWidget(b)
 
 	// Build squares, markers, and labels
-	objects := make([]fyne.CanvasObject, 0, 64+64+24)
+	// Labels: 0-7 bottom files, 8-15 left ranks, 16-23 top files, 24-31 right ranks
+	objects := make([]fyne.CanvasObject, 0, 64+64+32)
 
 	for row := 0; row < 8; row++ {
 		for col := 0; col < 8; col++ {
@@ -55,7 +56,7 @@ func NewBoardWidget() *BoardWidget {
 		}
 	}
 
-	// File labels (a-h) along the bottom
+	// File labels (a-h) along the bottom (indices 0-7)
 	for col := 0; col < 8; col++ {
 		t := canvas.NewText(string(rune('a'+col)), color.White)
 		t.TextSize = 11
@@ -64,7 +65,25 @@ func NewBoardWidget() *BoardWidget {
 		objects = append(objects, t)
 	}
 
-	// Rank labels (8-1) along the left
+	// Rank labels (8-1) along the left (indices 8-15)
+	for row := 0; row < 8; row++ {
+		t := canvas.NewText(string(rune('8'-row)), color.White)
+		t.TextSize = 11
+		t.Alignment = fyne.TextAlignCenter
+		b.labels = append(b.labels, t)
+		objects = append(objects, t)
+	}
+
+	// File labels (a-h) along the top (indices 16-23)
+	for col := 0; col < 8; col++ {
+		t := canvas.NewText(string(rune('a'+col)), color.White)
+		t.TextSize = 11
+		t.Alignment = fyne.TextAlignCenter
+		b.labels = append(b.labels, t)
+		objects = append(objects, t)
+	}
+
+	// Rank labels (8-1) along the right (indices 24-31)
 	for row := 0; row < 8; row++ {
 		t := canvas.NewText(string(rune('8'-row)), color.White)
 		t.TextSize = 11
@@ -118,9 +137,9 @@ func (r *boardRenderer) Refresh() {
 func (r *boardRenderer) Layout(size fyne.Size) {
 	labelMargin := float32(16)
 
-	// Available space for the board (square, fit within panel)
-	boardW := size.Width - labelMargin
-	boardH := size.Height - labelMargin
+	// Reserve space on all four sides for labels
+	boardW := size.Width - 2*labelMargin
+	boardH := size.Height - 2*labelMargin
 	boardSize := boardW
 	if boardH < boardSize {
 		boardSize = boardH
@@ -129,10 +148,10 @@ func (r *boardRenderer) Layout(size fyne.Size) {
 	sqSize := boardSize / 8
 
 	// Center the board within the available space
-	totalBoardW := sqSize*8 + labelMargin
-	totalBoardH := sqSize*8 + labelMargin
+	totalBoardW := sqSize*8 + 2*labelMargin
+	totalBoardH := sqSize*8 + 2*labelMargin
 	offsetX := labelMargin + (size.Width-totalBoardW)/2
-	offsetY := (size.Height - totalBoardH) / 2
+	offsetY := labelMargin + (size.Height-totalBoardH)/2
 
 	r.b.root.Resize(size)
 
@@ -152,7 +171,7 @@ func (r *boardRenderer) Layout(size fyne.Size) {
 		}
 	}
 
-	// File labels (a-h) below the board
+	// File labels (a-h) below the board (indices 0-7)
 	for i := 0; i < 8; i++ {
 		lbl := r.b.labels[i]
 		x := offsetX + float32(i)*sqSize
@@ -161,10 +180,28 @@ func (r *boardRenderer) Layout(size fyne.Size) {
 		lbl.Resize(fyne.NewSize(sqSize, labelMargin))
 	}
 
-	// Rank labels (8-1) to the left of the board
+	// Rank labels (8-1) to the left of the board (indices 8-15)
 	for i := 0; i < 8; i++ {
 		lbl := r.b.labels[8+i]
-		x := float32(0)
+		x := offsetX - labelMargin
+		y := offsetY + float32(i)*sqSize
+		lbl.Move(fyne.NewPos(x, y))
+		lbl.Resize(fyne.NewSize(labelMargin, sqSize))
+	}
+
+	// File labels (a-h) above the board (indices 16-23)
+	for i := 0; i < 8; i++ {
+		lbl := r.b.labels[16+i]
+		x := offsetX + float32(i)*sqSize
+		y := offsetY - labelMargin
+		lbl.Move(fyne.NewPos(x, y))
+		lbl.Resize(fyne.NewSize(sqSize, labelMargin))
+	}
+
+	// Rank labels (8-1) to the right of the board (indices 24-31)
+	for i := 0; i < 8; i++ {
+		lbl := r.b.labels[24+i]
+		x := offsetX + 8*sqSize
 		y := offsetY + float32(i)*sqSize
 		lbl.Move(fyne.NewPos(x, y))
 		lbl.Resize(fyne.NewSize(labelMargin, sqSize))

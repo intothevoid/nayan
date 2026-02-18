@@ -14,8 +14,12 @@ type VideoDisplay struct {
 	widget.BaseWidget
 
 	// mu ensures we don't read / write the image at the same time
-	mu    sync.Mutex
-	image *canvas.Image
+	mu         sync.Mutex
+	image      *canvas.Image
+	imgW, imgH int // original image dimensions (set in UpdateFrame)
+
+	// OnTapped is called with image-space coordinates when the user taps the display
+	OnTapped func(imgX, imgY int)
 }
 
 // NewVideoDisplay is used to create widget instance
@@ -33,11 +37,56 @@ func NewVideoDisplay() *VideoDisplay {
 func (v *VideoDisplay) UpdateFrame(img image.Image) {
 	v.mu.Lock()
 	v.image.Image = img
+	if img != nil {
+		v.imgW = img.Bounds().Dx()
+		v.imgH = img.Bounds().Dy()
+	}
 	v.mu.Unlock()
 
 	// Ask Fyne to queue redraw image on the main UI thread
 	v.Refresh()
 }
+
+// Tapped maps widget-space tap coordinates to image-space and calls OnTapped.
+func (v *VideoDisplay) Tapped(e *fyne.PointEvent) {
+	if v.OnTapped == nil {
+		return
+	}
+
+	v.mu.Lock()
+	iw, ih := v.imgW, v.imgH
+	v.mu.Unlock()
+
+	if iw == 0 || ih == 0 {
+		return
+	}
+
+	// Widget dimensions
+	widgetW := float64(v.Size().Width)
+	widgetH := float64(v.Size().Height)
+
+	// ImageFillContain scaling: uniform scale that fits the image inside the widget
+	scale := widgetW / float64(iw)
+	if s := widgetH / float64(ih); s < scale {
+		scale = s
+	}
+
+	// Offset to center the image within the widget
+	offsetX := (widgetW - float64(iw)*scale) / 2
+	offsetY := (widgetH - float64(ih)*scale) / 2
+
+	// Map tap position to image coordinates
+	imgX := int((float64(e.Position.X) - offsetX) / scale)
+	imgY := int((float64(e.Position.Y) - offsetY) / scale)
+
+	// Only call back if within image bounds
+	if imgX >= 0 && imgX < iw && imgY >= 0 && imgY < ih {
+		v.OnTapped(imgX, imgY)
+	}
+}
+
+// TappedSecondary is a no-op required by fyne.Tappable.
+func (v *VideoDisplay) TappedSecondary(*fyne.PointEvent) {}
 
 // CreateRenderer is used to create a video renderer
 func (v *VideoDisplay) CreateRenderer() fyne.WidgetRenderer {

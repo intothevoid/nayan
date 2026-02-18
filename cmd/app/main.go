@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"sync"
 	"time"
@@ -22,6 +23,18 @@ const (
 	DEVICE_ID_IPHONE int = 0
 	DEVICE_ID_WEBCAM int = 1
 )
+
+// Manual calibration state machine
+type calibState int
+
+const (
+	calibIdle      calibState = iota // waiting for user to click Calibrate
+	calibSelecting                   // user is clicking corners (0-3 collected)
+	calibDone                        // corners captured, detecting pieces
+)
+
+// Corner labels in selection order
+var cornerNames = [4]string{"top-left", "top-right", "bottom-right", "bottom-left"}
 
 // fixedHeightLayout gives its children a fixed height and the full available width.
 type fixedHeightLayout struct {
@@ -107,34 +120,7 @@ func main() {
 	})
 	warpedCheck.Checked = true
 
-	checkboxBar := container.NewHBox(greyCheck, edgesCheck, warpedCheck)
-
-	// ── Left panel ──
-	// Camera feed on top (takes 2x height), three debug views in a row below (1x height).
-	// Using VSplit at 0.67 gives the camera 2/3 and the debug row 1/3.
-	debugRow := container.NewGridWithColumns(3, greyDisplay, edgesDisplay, warpedDisplay)
-	leftContent := container.NewVSplit(mainDisplay, debugRow)
-	leftContent.Offset = 0.67
-	leftPanel := container.NewBorder(checkboxBar, nil, nil, nil, leftContent)
-
-	// ── Right panel ──
-	// Top: graphical board filling available space. Bottom: FEN + recommended move labels.
-	fenLabel := widget.NewLabel("FEN: (waiting for detection)")
-	fenLabel.TextStyle = fyne.TextStyle{Monospace: true}
-	fenLabel.Wrapping = fyne.TextWrapWord
-
-	moveLabel := widget.NewLabel("Recommended: --")
-	moveLabel.TextStyle = fyne.TextStyle{Bold: true}
-
-	analysisPanel := container.NewVBox(fenLabel, moveLabel)
-
-	rightPanel := container.NewBorder(nil, analysisPanel, nil, nil, boardWidget)
-
-	// ── Top area ──
-	topSplit := container.NewHSplit(leftPanel, rightPanel)
-	topSplit.Offset = 0.6
-
-	// ── Bottom status bar (fixed height) ──
+	// ── Status bar widgets (declared early so callbacks can reference them) ──
 	statusLabel := widget.NewLabel("Starting up...")
 	statusLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	statusLabel.Wrapping = fyne.TextWrapWord
@@ -142,6 +128,14 @@ func main() {
 	debugLabel := widget.NewLabel("")
 	debugLabel.TextStyle = fyne.TextStyle{Monospace: true}
 
+	// Helper to update status label from any goroutine
+	setStatus := func(msg string) {
+		fyne.Do(func() {
+			statusLabel.SetText(msg)
+		})
+	}
+
+	// Debug log buffer (keeps last few messages)
 	statusTitle := widget.NewRichTextFromMarkdown("**Status**")
 	debugTitle := widget.NewRichTextFromMarkdown("**Debug**")
 
@@ -155,20 +149,6 @@ func main() {
 	statusWrapper := container.New(layout.NewCustomPaddedLayout(4, 4, 4, 4), statusBar)
 	fixedStatusBar := container.New(&fixedHeightLayout{height: 120}, statusWrapper)
 
-	// ── Overall layout ──
-	// Border layout: fixed status bar pinned at bottom, top split fills the rest.
-	mainLayout := container.NewBorder(nil, fixedStatusBar, nil, nil, topSplit)
-
-	smoother := vision.NewBoardSmoother(0.3)
-
-	// Helper to update status label from the goroutine
-	setStatus := func(msg string) {
-		fyne.Do(func() {
-			statusLabel.SetText(msg)
-		})
-	}
-
-	// Debug log buffer (keeps last few messages)
 	var debugMu sync.Mutex
 	debugLines := make([]string, 0, 20)
 	addDebug := func(msg string) {
@@ -188,15 +168,84 @@ func main() {
 		})
 	}
 
-	// Calibration state
-	var referenceBoard gocv.Mat
-	calibrated := false
-	var boardDetectedSince time.Time
-	boardStable := false
+	// ── Calibration state (protected by calibMu) ──
+	var calibMu sync.Mutex
+	calibMode := calibIdle
+	calibCorners := make([]image.Point, 0, 4)
+	var manualCorners []image.Point // final 4 corners for warping
+	calibDoneFrame := 0            // frame counter for "Calibration complete!" overlay
+
+	// Calibrate button — green with white text, in the toolbar
+	calibrateBtn := widget.NewButton("Calibrate", func() {
+		calibMu.Lock()
+		calibMode = calibSelecting
+		calibCorners = calibCorners[:0]
+		manualCorners = nil
+		calibDoneFrame = 0
+		calibMu.Unlock()
+
+		setStatus("Click the 4 board corners: TL, TR, BR, BL")
+		addDebug("Calibration started — click 4 corners on camera feed")
+	})
+	calibrateBtn.Importance = widget.SuccessImportance
+
+	checkboxBar := container.NewBorder(nil, nil, nil, calibrateBtn,
+		container.NewHBox(greyCheck, edgesCheck, warpedCheck))
+
+	// ── Left panel ──
+	debugRow := container.NewGridWithColumns(3, greyDisplay, edgesDisplay, warpedDisplay)
+	leftContent := container.NewVSplit(mainDisplay, debugRow)
+	leftContent.Offset = 0.67
+	leftPanel := container.NewBorder(checkboxBar, nil, nil, nil, leftContent)
+
+	// ── Right panel ──
+	fenLabel := widget.NewLabel("FEN: (waiting for calibration)")
+	fenLabel.TextStyle = fyne.TextStyle{Monospace: true}
+	fenLabel.Wrapping = fyne.TextWrapWord
+
+	moveLabel := widget.NewLabel("Recommended: --")
+	moveLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	analysisPanel := container.NewVBox(fenLabel, moveLabel)
+	rightPanel := container.NewBorder(nil, analysisPanel, nil, nil, boardWidget)
+
+	// ── Top area ──
+	topSplit := container.NewHSplit(leftPanel, rightPanel)
+	topSplit.Offset = 0.6
+
+	// ── Overall layout ──
+	mainLayout := container.NewBorder(nil, fixedStatusBar, nil, nil, topSplit)
+
 	var lastOccupancy [8][8]bool
 
 	setStatus("Waiting for camera...")
 	addDebug("Application started")
+
+	// ── Tap handler for corner selection ──
+	mainDisplay.OnTapped = func(imgX, imgY int) {
+		calibMu.Lock()
+		defer calibMu.Unlock()
+
+		if calibMode != calibSelecting {
+			return
+		}
+
+		calibCorners = append(calibCorners, image.Point{X: imgX, Y: imgY})
+		n := len(calibCorners)
+		addDebug(fmt.Sprintf("Corner %d/4 selected at (%d, %d) — %s", n, imgX, imgY, cornerNames[n-1]))
+
+		if n < 4 {
+			setStatus(fmt.Sprintf("Corner %d/4 selected. Click %s corner next", n, cornerNames[n]))
+			return
+		}
+
+		// All 4 corners collected — finalize calibration
+		manualCorners = vision.ReorderPoints(calibCorners)
+		calibMode = calibDone
+		calibDoneFrame = 0
+		setStatus("Calibration complete! Corners locked.")
+		addDebug("All 4 corners captured, calibration done")
+	}
 
 	// 4. The Background Loop (Goroutine)
 	go func() {
@@ -207,16 +256,16 @@ func main() {
 				continue
 			}
 
-			// Mirror the camera feed horizontally so it feels natural
+			// Mirror the camera feed so it feels natural
 			gocv.Flip(*mat, mat, -1)
 			frameCount++
 
 			if frameCount == 1 {
-				setStatus("Camera ready. Looking for board...")
+				setStatus("Click CALIBRATE, then click the 4 board corners")
 				addDebug("First frame received from camera")
 			}
 
-			// Run preprocessing and get intermediate stages for debug views
+			// Run preprocessing for debug views
 			tempMat := mat.Clone()
 			stages := vision.PreprocessStages(tempMat)
 			tempMat.Close()
@@ -238,85 +287,101 @@ func main() {
 				edgesDisplay.UpdateFrame(edgesImg)
 			}
 
-			if !stages.Edges.Empty() && stages.Edges.Rows() > 0 {
-				rawCorners := vision.DetectBoard(stages.Edges)
-				stableCorners := smoother.Smooth(rawCorners)
+			// Snapshot calibration state for this frame
+			calibMu.Lock()
+			mode := calibMode
+			cornersCopy := make([]image.Point, len(calibCorners))
+			copy(cornersCopy, calibCorners)
+			var warpCorners []image.Point
+			if manualCorners != nil {
+				warpCorners = make([]image.Point, 4)
+				copy(warpCorners, manualCorners)
+			}
+			doneFrame := calibDoneFrame
+			calibDoneFrame++
+			calibMu.Unlock()
 
-				if len(stableCorners) == 4 {
-					// Stage 1: Warp by outer frame corners
-					outerWarp := vision.WarpBoard(*mat, stableCorners)
+			// Draw overlay depending on calibration state
+			switch mode {
+			case calibIdle:
+				// Prompt the user to click the Calibrate button
+				text := "Click the Calibrate button to begin..."
+				gocv.PutTextWithParams(mat, text,
+					image.Pt(mat.Cols()/2-250, mat.Rows()/2),
+					gocv.FontHersheyDuplex, 0.7,
+					color.RGBA{255, 255, 255, 0}, 2, gocv.LineAA, false)
 
-					// Stage 2: Crop to just the 64 squares
-					innerRect := vision.DetectInnerBoard(outerWarp, 0.01)
-					warpedMat := vision.CropAndRewarp(outerWarp, innerRect)
-					outerWarp.Close()
-
-					// Calibration: after board detected stably for 3 seconds, capture reference
-					if !calibrated {
-						if !boardStable {
-							boardDetectedSince = time.Now()
-							boardStable = true
-							setStatus("Board detected. Starting calibration... please wait")
-							addDebug("Board corners found, starting stability timer")
-						} else {
-							elapsed := time.Since(boardDetectedSince)
-							remaining := 3*time.Second - elapsed
-							if remaining > 0 {
-								setStatus(fmt.Sprintf("Calibrating... %.1fs remaining", remaining.Seconds()))
-							}
-							if elapsed >= 3*time.Second {
-								referenceBoard = warpedMat.Clone()
-								calibrated = true
-								setStatus("Calibration complete! Place pieces on the board")
-								addDebug("Reference board captured successfully")
-								fmt.Println("Calibration complete — reference board captured")
-							}
-						}
-					}
-
-					// If calibrated, scan for occupancy and update board widget
-					if calibrated {
-						occupancy := vision.ScanBoard(warpedMat, referenceBoard)
-						vision.DrawOccupancy(&warpedMat, occupancy)
-
-						if occupancy != lastOccupancy {
-							vision.PrintOccupancy(occupancy)
-							boardWidget.UpdateOccupancy(occupancy)
-
-							count := 0
-							for r := 0; r < 8; r++ {
-								for c := 0; c < 8; c++ {
-									if occupancy[r][c] {
-										count++
-									}
-								}
-							}
-							addDebug(fmt.Sprintf("Occupancy changed: %d squares occupied", count))
-							lastOccupancy = occupancy
-						}
-					}
-
-					// Draw the grid on the warped mat and update debug view
-					vision.DrawGrid(&warpedMat)
-
-					if wantWarped {
-						warpedImg, _ := warpedMat.ToImage()
-						warpedDisplay.UpdateFrame(warpedImg)
-					}
-
-					// Draw corner markers on the original mat (thin white circles)
-					for _, pt := range stableCorners {
-						gocv.Circle(mat, pt, 8, color.RGBA{255, 255, 255, 0}, 1)
-					}
-
-					warpedMat.Close()
-				} else {
-					if boardStable && !calibrated {
-						setStatus("Board lost. Looking for board...")
-						addDebug("Board detection lost, resetting timer")
-					}
-					boardStable = false
+			case calibSelecting:
+				// Draw already-clicked corners as numbered circles
+				colours := []color.RGBA{
+					{0, 255, 0, 0},   // green
+					{0, 200, 255, 0}, // cyan
+					{255, 165, 0, 0}, // orange
+					{255, 0, 255, 0}, // magenta
 				}
+				for i, pt := range cornersCopy {
+					gocv.Circle(mat, pt, 10, colours[i], 3)
+					gocv.PutTextWithParams(mat, fmt.Sprintf("%d", i+1),
+						image.Pt(pt.X+14, pt.Y-6),
+						gocv.FontHersheyDuplex, 0.6,
+						colours[i], 2, gocv.LineAA, false)
+				}
+
+				next := len(cornersCopy)
+				if next < 4 {
+					gocv.PutTextWithParams(mat,
+						fmt.Sprintf("Click corner %d/4: %s", next+1, cornerNames[next]),
+						image.Pt(20, 40),
+						gocv.FontHersheyDuplex, 0.7,
+						color.RGBA{255, 255, 0, 0}, 2, gocv.LineAA, false)
+				}
+
+			case calibDone:
+				// Show "Calibration complete!" briefly (~2 seconds = ~60 frames)
+				if doneFrame < 60 {
+					gocv.PutTextWithParams(mat, "Calibration complete!",
+						image.Pt(20, 40),
+						gocv.FontHersheyDuplex, 0.8,
+						color.RGBA{0, 255, 0, 0}, 2, gocv.LineAA, false)
+				}
+
+				// Warp using manual corners
+				warpedMat := vision.WarpBoard(*mat, warpCorners)
+
+				// Detect pieces using variance-based detection (no reference needed)
+				occupancy := vision.ScanBoardAbsolute(warpedMat)
+				vision.DrawOccupancy(&warpedMat, occupancy)
+
+				if occupancy != lastOccupancy {
+					vision.PrintOccupancy(occupancy)
+					boardWidget.UpdateOccupancy(occupancy)
+
+					count := 0
+					for r := 0; r < 8; r++ {
+						for c := 0; c < 8; c++ {
+							if occupancy[r][c] {
+								count++
+							}
+						}
+					}
+					addDebug(fmt.Sprintf("Occupancy changed: %d squares occupied", count))
+					lastOccupancy = occupancy
+				}
+
+				// Draw grid and update warped debug view
+				vision.DrawGrid(&warpedMat)
+
+				if wantWarped {
+					warpedImg, _ := warpedMat.ToImage()
+					warpedDisplay.UpdateFrame(warpedImg)
+				}
+
+				// Draw corner markers on camera feed
+				for _, pt := range warpCorners {
+					gocv.Circle(mat, pt, 8, color.RGBA{255, 255, 255, 0}, 2)
+				}
+
+				warpedMat.Close()
 			}
 
 			// Update the main camera display
