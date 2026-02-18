@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
@@ -192,8 +194,8 @@ func main() {
 	var manualCorners []image.Point // final 4 corners for warping
 	calibDoneFrame := 0            // frame counter for "Calibration complete!" overlay
 
-	// Calibrate button — green with white text, in the toolbar
-	calibrateBtn := widget.NewButton("Calibrate", func() {
+	// Reusable calibration start function
+	startCalibration := func() {
 		calibMu.Lock()
 		calibMode = calibSelecting
 		calibCorners = calibCorners[:0]
@@ -203,11 +205,16 @@ func main() {
 
 		setStatus("Click the 4 board corners: TL, TR, BR, BL")
 		addDebug("Calibration started — click 4 corners on camera feed")
-	})
-	calibrateBtn.Importance = widget.SuccessImportance
+	}
 
-	checkboxBar := container.NewBorder(nil, nil, nil, calibrateBtn,
-		container.NewHBox(greyCheck, edgesCheck, warpedCheck))
+	// Calibrate button — amber/warning importance
+	calibrateBtn := widget.NewButton("Calibrate", func() {
+		startCalibration()
+	})
+	calibrateBtn.Importance = widget.WarningImportance
+
+	// Checkbox bar (without calibrate button — it moved to game controls)
+	checkboxBar := container.NewHBox(greyCheck, edgesCheck, warpedCheck)
 
 	// ── Left panel ──
 	debugRow := container.NewGridWithColumns(3, greyDisplay, edgesDisplay, warpedDisplay)
@@ -233,6 +240,10 @@ func main() {
 	stableDiffCount := 0
 	var pendingOcc [8][8]bool
 
+	// Invalid move state
+	invalidMoveActive := false
+	var invalidSoundStop chan struct{}
+
 	selectedColor := nchess.White
 	colorRadio := widget.NewRadioGroup([]string{"White", "Black"}, func(value string) {
 		if value == "Black" {
@@ -244,8 +255,9 @@ func main() {
 	colorRadio.SetSelected("White")
 	colorRadio.Horizontal = true
 
+	// Start Game button — green/success importance
 	startBtn := widget.NewButton("Start Game", nil)
-	startBtn.Importance = widget.HighImportance
+	startBtn.Importance = widget.SuccessImportance
 
 	startBtn.OnTapped = func() {
 		gameMu.Lock()
@@ -253,13 +265,37 @@ func main() {
 			gameMu.Unlock()
 			return
 		}
+		gameMu.Unlock()
 
+		// Check if board is calibrated
+		calibMu.Lock()
+		isCalibrated := calibMode == calibDone
+		calibMu.Unlock()
+
+		if !isCalibrated {
+			dialog.ShowConfirm(
+				"Board Not Calibrated",
+				"The board must be calibrated before starting a game.\n\nWould you like to calibrate now?",
+				func(yes bool) {
+					if yes {
+						startCalibration()
+					}
+				},
+				window,
+			)
+			return
+		}
+
+		gameMu.Lock()
 		gameState = nchess.NewGame(selectedColor)
 		currentState = statePlaying
 		stableDiffCount = 0
+		invalidMoveActive = false
 		gameMu.Unlock()
 
+		boardWidget.ClearArrow()
 		boardWidget.ClearHighlight()
+		boardWidget.UpdatePieces(pieceGridToUI(gameState.PieceGrid()), false)
 		fyne.Do(func() {
 			fenLabel.SetText("FEN: " + gameState.FEN())
 			moveLabel.SetText("Recommended: --")
@@ -295,10 +331,13 @@ func main() {
 		}()
 	}
 
+	// Button row — equal-width side by side
+	buttonRow := container.NewGridWithColumns(2, calibrateBtn, startBtn)
+
 	gameControls := container.NewVBox(
 		widget.NewRichTextFromMarkdown("**Play as:**"),
 		colorRadio,
-		startBtn,
+		buttonRow,
 	)
 
 	analysisPanel := container.NewVBox(gameControls, fenLabel, moveLabel)
@@ -449,7 +488,6 @@ func main() {
 
 				if occupancy != lastOccupancy {
 					vision.PrintOccupancy(occupancy)
-					boardWidget.UpdateOccupancy(occupancy)
 
 					count := 0
 					for r := 0; r < 8; r++ {
@@ -482,20 +520,37 @@ func main() {
 						}
 
 						if stableDiffCount == stabilityThreshold {
-							move, err := gs.InferMove(occupancy)
-							if err != nil {
-								addDebug(fmt.Sprintf("Move inference failed: %v", err))
+							move, inferErr := gs.InferMove(occupancy)
+							if inferErr != nil {
+								// Invalid move — flash differing squares and play alert
+								if !invalidMoveActive {
+									invalidMoveActive = true
+									addDebug(fmt.Sprintf("Invalid move detected: %v", inferErr))
+									setStatus("Invalid move! Please correct the board.")
+									invalidSoundStop = make(chan struct{})
+									go invalidMoveAlertLoop(invalidSoundStop)
+								}
+								diffs := diffSquares(expected, occupancy)
+								boardWidget.FlashInvalid(diffs)
 							} else {
+								// Valid move — clear any invalid state
+								if invalidMoveActive {
+									invalidMoveActive = false
+									close(invalidSoundStop)
+									boardWidget.ClearInvalid()
+								}
+
 								notation := gs.MoveToAlgebraic(move)
 								if applyErr := gs.ApplyMove(move); applyErr != nil {
 									addDebug(fmt.Sprintf("Failed to apply move: %v", applyErr))
 								} else {
 									addDebug(fmt.Sprintf("Move detected: %s", notation))
+									boardWidget.UpdatePieces(pieceGridToUI(gs.PieceGrid()), false)
+									boardWidget.ClearArrow()
 									fyne.Do(func() {
 										fenLabel.SetText("FEN: " + gs.FEN())
 										moveLabel.SetText(fmt.Sprintf("Last move: %s", notation))
 									})
-									boardWidget.ClearHighlight()
 
 									if gs.IsGameOver() {
 										gameMu.Lock()
@@ -504,6 +559,7 @@ func main() {
 										outcome := gs.Outcome()
 										addDebug(fmt.Sprintf("Game over: %s", outcome))
 										setStatus(fmt.Sprintf("Game over: %s", outcome))
+										boardWidget.UpdatePieces(ui.StartingPosition(), true)
 										fyne.Do(func() {
 											startBtn.SetText("Start Game")
 											startBtn.Enable()
@@ -519,6 +575,13 @@ func main() {
 					} else {
 						// Occupancy matches expected — reset stability counter
 						stableDiffCount = 0
+						if invalidMoveActive {
+							invalidMoveActive = false
+							close(invalidSoundStop)
+							boardWidget.ClearInvalid()
+							setStatus("Board corrected. Your move.")
+							addDebug("Board matches expected position")
+						}
 					}
 				}
 
@@ -565,6 +628,83 @@ func main() {
 	gameMu.Unlock()
 }
 
+// diffSquares returns the [row, col] pairs where expected and observed differ.
+func diffSquares(expected, observed [8][8]bool) [][2]int {
+	var diffs [][2]int
+	for r := 0; r < 8; r++ {
+		for c := 0; c < 8; c++ {
+			if expected[r][c] != observed[r][c] {
+				diffs = append(diffs, [2]int{r, c})
+			}
+		}
+	}
+	return diffs
+}
+
+// invalidMoveAlertLoop plays an alert sound immediately, then every 10 seconds,
+// until the stop channel is closed.
+func invalidMoveAlertLoop(stop <-chan struct{}) {
+	playAlertSound()
+	ticker := time.NewTicker(4 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			playAlertSound()
+		}
+	}
+}
+
+// playAlertSound plays a system alert sound (macOS).
+func playAlertSound() {
+	exec.Command("afplay", "/System/Library/Sounds/Funk.aiff").Run()
+}
+
+// pieceGridToUI converts a chess.Piece grid from GameState to ui.PieceType grid.
+func pieceGridToUI(grid [8][8]chess.Piece) [8][8]ui.PieceType {
+	var result [8][8]ui.PieceType
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			result[row][col] = chessPieceToUI(grid[row][col])
+		}
+	}
+	return result
+}
+
+// chessPieceToUI converts a single chess.Piece to ui.PieceType.
+func chessPieceToUI(p chess.Piece) ui.PieceType {
+	switch p {
+	case chess.WhiteKing:
+		return ui.WhiteKing
+	case chess.WhiteQueen:
+		return ui.WhiteQueen
+	case chess.WhiteRook:
+		return ui.WhiteRook
+	case chess.WhiteBishop:
+		return ui.WhiteBishop
+	case chess.WhiteKnight:
+		return ui.WhiteKnight
+	case chess.WhitePawn:
+		return ui.WhitePawn
+	case chess.BlackKing:
+		return ui.BlackKing
+	case chess.BlackQueen:
+		return ui.BlackQueen
+	case chess.BlackRook:
+		return ui.BlackRook
+	case chess.BlackBishop:
+		return ui.BlackBishop
+	case chess.BlackKnight:
+		return ui.BlackKnight
+	case chess.BlackPawn:
+		return ui.BlackPawn
+	default:
+		return ui.NoPieceType
+	}
+}
+
 // queryStockfish asks the engine for the best move and updates the UI.
 func queryStockfish(gs *nchess.GameState, eng *engine.Engine, moveLabel *widget.Label, boardWidget *ui.BoardWidget, addDebug func(string)) {
 	bestMove, err := eng.BestMove(gs.Game(), 15)
@@ -578,7 +718,7 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, moveLabel *widget.
 
 	fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
 	toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
-	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
+	boardWidget.ShowArrow(fromRow, fromCol, toRow, toCol)
 
 	fyne.Do(func() {
 		moveLabel.SetText(fmt.Sprintf("Recommended: %s", notation))

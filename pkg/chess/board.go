@@ -146,6 +146,18 @@ func (gs *GameState) ApplyMove(m *chess.Move) error {
 	return gs.game.Move(m)
 }
 
+// PieceGrid returns the current board as an 8x8 grid of chess.Piece values.
+// Row 0 = rank 8 (top), col 0 = file a (left).
+func (gs *GameState) PieceGrid() [8][8]chess.Piece {
+	var grid [8][8]chess.Piece
+	board := gs.game.Position().Board()
+	for sq := chess.A1; sq <= chess.H8; sq++ {
+		row, col := RowColFromSquare(sq)
+		grid[row][col] = board.Piece(sq)
+	}
+	return grid
+}
+
 // occupancyFromBoard generates an occupancy grid from a chess.Board.
 func occupancyFromBoard(board *chess.Board) [8][8]bool {
 	var occ [8][8]bool
