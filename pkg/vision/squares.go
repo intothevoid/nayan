@@ -48,19 +48,59 @@ func GetSquare(warped gocv.Mat, col, row int) gocv.Mat {
 	return warped.Region(rect)
 }
 
-// ScanBoard compares every square of the live warped board against the
-// reference (empty board) and returns an 8x8 occupancy grid.
-// true = occupied, false = empty.
+// minBlobArea is the minimum number of pixels a connected region must have
+// to be considered a piece. Filters out noise and small shadows.
+const minBlobArea = 200
+
+// ScanBoard computes a whole-board diff, finds connected blobs, and assigns
+// each blob to the square containing its centroid. This prevents a single
+// tall piece from triggering multiple squares — no matter how much the piece
+// image bleeds across square boundaries, its centroid stays on the square
+// where the base sits.
 func ScanBoard(live, reference gocv.Mat) [8][8]bool {
 	var occupancy [8][8]bool
-	for row := 0; row < 8; row++ {
-		for col := 0; col < 8; col++ {
-			liveSq := GetSquare(live, col, row)
-			refSq := GetSquare(reference, col, row)
-			occupied, _ := IsSquareOccupied(liveSq, refSq)
-			occupancy[row][col] = occupied
+
+	// 1. Full-board absolute difference
+	diff := gocv.NewMat()
+	defer diff.Close()
+	gocv.AbsDiff(live, reference, &diff)
+
+	// 2. Convert to greyscale and threshold
+	grey := gocv.NewMat()
+	defer grey.Close()
+	gocv.CvtColor(diff, &grey, gocv.ColorBGRToGray)
+	gocv.Threshold(grey, &grey, 40, 255, gocv.ThresholdBinary)
+
+	// 3. Morphological open to remove small noise, then close to merge nearby regions
+	kernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Pt(5, 5))
+	defer kernel.Close()
+	gocv.MorphologyEx(grey, &grey, gocv.MorphOpen, kernel)
+	gocv.MorphologyEx(grey, &grey, gocv.MorphClose, kernel)
+
+	// 4. Find connected components (contours)
+	contours := gocv.FindContours(grey, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours.Close()
+
+	for i := 0; i < contours.Size(); i++ {
+		cnt := contours.At(i)
+		area := gocv.ContourArea(cnt)
+		if area < minBlobArea {
+			continue
+		}
+
+		// Compute centroid from bounding rectangle center
+		br := gocv.BoundingRect(cnt)
+		cx := br.Min.X + br.Dx()/2
+		cy := br.Min.Y + br.Dy()/2
+
+		// Map centroid pixel to board square
+		col := cx / 100
+		row := cy / 100
+		if col >= 0 && col < 8 && row >= 0 && row < 8 {
+			occupancy[row][col] = true
 		}
 	}
+
 	return occupancy
 }
 
