@@ -11,9 +11,11 @@ import (
 )
 
 var (
-	lightSquare = color.NRGBA{R: 0xf0, G: 0xd9, B: 0xb5, A: 0xff} // #f0d9b5
-	darkSquare  = color.NRGBA{R: 0xb5, G: 0x88, B: 0x63, A: 0xff} // #b58863
-	markerColor = color.NRGBA{R: 0x33, G: 0x33, B: 0x33, A: 0xcc} // dark semi-transparent
+	lightSquare    = color.NRGBA{R: 0xf0, G: 0xd9, B: 0xb5, A: 0xff} // #f0d9b5
+	darkSquare     = color.NRGBA{R: 0xb5, G: 0x88, B: 0x63, A: 0xff} // #b58863
+	markerColor    = color.NRGBA{R: 0x33, G: 0x33, B: 0x33, A: 0xcc} // dark semi-transparent
+	highlightFrom  = color.NRGBA{R: 0x00, G: 0x88, B: 0xff, A: 0x80} // blue semi-transparent
+	highlightTo    = color.NRGBA{R: 0x00, G: 0xcc, B: 0x44, A: 0x80} // green semi-transparent
 )
 
 // BoardWidget is a lichess-style virtual chessboard that shows occupancy markers.
@@ -24,10 +26,11 @@ type BoardWidget struct {
 	occupancy [8][8]bool
 
 	// Pre-built canvas objects
-	squares [8][8]*canvas.Rectangle
-	markers [8][8]*canvas.Circle
-	labels  []fyne.CanvasObject
-	root    *fyne.Container
+	squares    [8][8]*canvas.Rectangle
+	highlights [8][8]*canvas.Rectangle
+	markers    [8][8]*canvas.Circle
+	labels     []fyne.CanvasObject
+	root       *fyne.Container
 }
 
 // NewBoardWidget creates a new virtual chessboard widget.
@@ -35,9 +38,9 @@ func NewBoardWidget() *BoardWidget {
 	b := &BoardWidget{}
 	b.ExtendBaseWidget(b)
 
-	// Build squares, markers, and labels
+	// Build squares, highlights, markers, and labels
 	// Labels: 0-7 bottom files, 8-15 left ranks, 16-23 top files, 24-31 right ranks
-	objects := make([]fyne.CanvasObject, 0, 64+64+32)
+	objects := make([]fyne.CanvasObject, 0, 64+64+64+32)
 
 	for row := 0; row < 8; row++ {
 		for col := 0; col < 8; col++ {
@@ -48,6 +51,11 @@ func NewBoardWidget() *BoardWidget {
 			rect := canvas.NewRectangle(c)
 			b.squares[row][col] = rect
 			objects = append(objects, rect)
+
+			hl := canvas.NewRectangle(color.Transparent)
+			hl.Hidden = true
+			b.highlights[row][col] = hl
+			objects = append(objects, hl)
 
 			circle := canvas.NewCircle(markerColor)
 			circle.Hidden = true
@@ -112,6 +120,35 @@ func (b *BoardWidget) UpdateOccupancy(occ [8][8]bool) {
 	})
 }
 
+// HighlightMove shows from/to square highlights on the board.
+func (b *BoardWidget) HighlightMove(fromRow, fromCol, toRow, toCol int) {
+	fyne.Do(func() {
+		b.clearHighlightsUnsafe()
+		b.highlights[fromRow][fromCol].FillColor = highlightFrom
+		b.highlights[fromRow][fromCol].Hidden = false
+		b.highlights[fromRow][fromCol].Refresh()
+		b.highlights[toRow][toCol].FillColor = highlightTo
+		b.highlights[toRow][toCol].Hidden = false
+		b.highlights[toRow][toCol].Refresh()
+	})
+}
+
+// ClearHighlight hides all highlight rectangles.
+func (b *BoardWidget) ClearHighlight() {
+	fyne.Do(func() {
+		b.clearHighlightsUnsafe()
+	})
+}
+
+func (b *BoardWidget) clearHighlightsUnsafe() {
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			b.highlights[row][col].Hidden = true
+			b.highlights[row][col].Refresh()
+		}
+	}
+}
+
 func (b *BoardWidget) CreateRenderer() fyne.WidgetRenderer {
 	return &boardRenderer{b: b}
 }
@@ -162,6 +199,9 @@ func (r *boardRenderer) Layout(size fyne.Size) {
 
 			r.b.squares[row][col].Move(fyne.NewPos(x, y))
 			r.b.squares[row][col].Resize(fyne.NewSize(sqSize, sqSize))
+
+			r.b.highlights[row][col].Move(fyne.NewPos(x, y))
+			r.b.highlights[row][col].Resize(fyne.NewSize(sqSize, sqSize))
 
 			// Marker is a circle inset within the square
 			markerSize := sqSize * 0.4

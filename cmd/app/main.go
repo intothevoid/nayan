@@ -7,9 +7,12 @@ import (
 	"sync"
 	"time"
 
+	nchess "github.com/intothevoid/nayan/pkg/chess"
 	"github.com/intothevoid/nayan/pkg/camera"
+	"github.com/intothevoid/nayan/pkg/engine"
 	"github.com/intothevoid/nayan/pkg/ui"
 	"github.com/intothevoid/nayan/pkg/vision"
+	"github.com/notnil/chess"
 	"gocv.io/x/gocv"
 
 	"fyne.io/fyne/v2"
@@ -32,6 +35,20 @@ const (
 	calibSelecting                   // user is clicking corners (0-3 collected)
 	calibDone                        // corners captured, detecting pieces
 )
+
+// Game state machine
+type appState int
+
+const (
+	statePreGame  appState = iota // waiting for user to start a game
+	statePlaying                  // game in progress
+	stateGameOver                 // game finished
+)
+
+// stabilityThreshold is the number of consecutive frames with the same
+// occupancy diff required before we infer a move. Prevents false detections
+// from hand movement or transient noise.
+const stabilityThreshold = 5
 
 // Corner labels in selection order
 var cornerNames = [4]string{"top-left", "top-right", "bottom-right", "bottom-left"}
@@ -206,7 +223,85 @@ func main() {
 	moveLabel := widget.NewLabel("Recommended: --")
 	moveLabel.TextStyle = fyne.TextStyle{Bold: true}
 
-	analysisPanel := container.NewVBox(fenLabel, moveLabel)
+	// ── Game controls ──
+	var gameMu sync.Mutex
+	currentState := statePreGame
+	var gameState *nchess.GameState
+	var stockfish *engine.Engine
+
+	// Stability counter for move detection
+	stableDiffCount := 0
+	var pendingOcc [8][8]bool
+
+	selectedColor := nchess.White
+	colorRadio := widget.NewRadioGroup([]string{"White", "Black"}, func(value string) {
+		if value == "Black" {
+			selectedColor = nchess.Black
+		} else {
+			selectedColor = nchess.White
+		}
+	})
+	colorRadio.SetSelected("White")
+	colorRadio.Horizontal = true
+
+	startBtn := widget.NewButton("Start Game", nil)
+	startBtn.Importance = widget.HighImportance
+
+	startBtn.OnTapped = func() {
+		gameMu.Lock()
+		if currentState == statePlaying {
+			gameMu.Unlock()
+			return
+		}
+
+		gameState = nchess.NewGame(selectedColor)
+		currentState = statePlaying
+		stableDiffCount = 0
+		gameMu.Unlock()
+
+		boardWidget.ClearHighlight()
+		fyne.Do(func() {
+			fenLabel.SetText("FEN: " + gameState.FEN())
+			moveLabel.SetText("Recommended: --")
+			startBtn.SetText("Game in progress")
+			startBtn.Disable()
+		})
+
+		addDebug(fmt.Sprintf("Game started — playing as %s", colorRadio.Selected))
+		setStatus("Game started! Make your move on the board.")
+
+		// Start Stockfish engine (graceful fallback)
+		go func() {
+			eng, err := engine.NewEngine()
+			if err != nil {
+				addDebug(fmt.Sprintf("Stockfish not available: %v", err))
+				setStatus("Game started (no engine). Make your move.")
+				return
+			}
+			gameMu.Lock()
+			stockfish = eng
+			gameMu.Unlock()
+			addDebug("Stockfish engine started")
+
+			// If human is Black, query Stockfish for White's first move
+			gameMu.Lock()
+			gs := gameState
+			isHumanTurn := gs.IsHumanTurn()
+			gameMu.Unlock()
+
+			if !isHumanTurn {
+				queryStockfish(gs, eng, moveLabel, boardWidget, addDebug)
+			}
+		}()
+	}
+
+	gameControls := container.NewVBox(
+		widget.NewRichTextFromMarkdown("**Play as:**"),
+		colorRadio,
+		startBtn,
+	)
+
+	analysisPanel := container.NewVBox(gameControls, fenLabel, moveLabel)
 	rightPanel := container.NewBorder(nil, analysisPanel, nil, nil, boardWidget)
 
 	// ── Top area ──
@@ -368,6 +463,65 @@ func main() {
 					lastOccupancy = occupancy
 				}
 
+				// ── Game logic: infer moves from occupancy changes ──
+				gameMu.Lock()
+				gs := gameState
+				state := currentState
+				eng := stockfish
+				gameMu.Unlock()
+
+				if state == statePlaying && gs != nil {
+					expected := gs.ExpectedOccupancy()
+					if occupancy != expected {
+						// Occupancy differs from game state — potential move
+						if occupancy == pendingOcc {
+							stableDiffCount++
+						} else {
+							pendingOcc = occupancy
+							stableDiffCount = 1
+						}
+
+						if stableDiffCount == stabilityThreshold {
+							move, err := gs.InferMove(occupancy)
+							if err != nil {
+								addDebug(fmt.Sprintf("Move inference failed: %v", err))
+							} else {
+								notation := gs.MoveToAlgebraic(move)
+								if applyErr := gs.ApplyMove(move); applyErr != nil {
+									addDebug(fmt.Sprintf("Failed to apply move: %v", applyErr))
+								} else {
+									addDebug(fmt.Sprintf("Move detected: %s", notation))
+									fyne.Do(func() {
+										fenLabel.SetText("FEN: " + gs.FEN())
+										moveLabel.SetText(fmt.Sprintf("Last move: %s", notation))
+									})
+									boardWidget.ClearHighlight()
+
+									if gs.IsGameOver() {
+										gameMu.Lock()
+										currentState = stateGameOver
+										gameMu.Unlock()
+										outcome := gs.Outcome()
+										addDebug(fmt.Sprintf("Game over: %s", outcome))
+										setStatus(fmt.Sprintf("Game over: %s", outcome))
+										fyne.Do(func() {
+											startBtn.SetText("Start Game")
+											startBtn.Enable()
+										})
+									} else if !gs.IsHumanTurn() && eng != nil {
+										// Engine's turn — query Stockfish
+										go queryStockfish(gs, eng, moveLabel, boardWidget, addDebug)
+									}
+								}
+							}
+							stableDiffCount = 0
+						}
+					} else {
+						// Occupancy matches expected — reset stability counter
+						stableDiffCount = 0
+					}
+				}
+
 				// Draw grid and update warped debug view
 				vision.DrawGrid(&warpedMat)
 
@@ -402,4 +556,31 @@ func main() {
 	window.Resize(fyne.NewSize(1280, 900))
 	window.SetFullScreen(true)
 	window.ShowAndRun()
+
+	// Cleanup Stockfish on exit
+	gameMu.Lock()
+	if stockfish != nil {
+		stockfish.Close()
+	}
+	gameMu.Unlock()
+}
+
+// queryStockfish asks the engine for the best move and updates the UI.
+func queryStockfish(gs *nchess.GameState, eng *engine.Engine, moveLabel *widget.Label, boardWidget *ui.BoardWidget, addDebug func(string)) {
+	bestMove, err := eng.BestMove(gs.Game(), 15)
+	if err != nil {
+		addDebug(fmt.Sprintf("Stockfish error: %v", err))
+		return
+	}
+
+	notation := chess.AlgebraicNotation{}.Encode(gs.Game().Position(), bestMove)
+	addDebug(fmt.Sprintf("Stockfish recommends: %s", notation))
+
+	fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
+	toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
+	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
+
+	fyne.Do(func() {
+		moveLabel.SetText(fmt.Sprintf("Recommended: %s", notation))
+	})
 }
