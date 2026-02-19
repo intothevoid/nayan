@@ -158,6 +158,18 @@ func (gs *GameState) PieceGrid() [8][8]chess.Piece {
 	return grid
 }
 
+// PieceGridFromPosition returns a piece grid from any chess.Position.
+// Useful for displaying historical positions (e.g. move history viewer).
+func PieceGridFromPosition(pos *chess.Position) [8][8]chess.Piece {
+	var grid [8][8]chess.Piece
+	board := pos.Board()
+	for sq := chess.A1; sq <= chess.H8; sq++ {
+		row, col := RowColFromSquare(sq)
+		grid[row][col] = board.Piece(sq)
+	}
+	return grid
+}
+
 // occupancyFromBoard generates an occupancy grid from a chess.Board.
 func occupancyFromBoard(board *chess.Board) [8][8]bool {
 	var occ [8][8]bool

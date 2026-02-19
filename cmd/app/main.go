@@ -228,8 +228,35 @@ func main() {
 	fenLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	fenLabel.Wrapping = fyne.TextWrapWord
 
-	moveLabel := widget.NewLabel("Recommended: --")
-	moveLabel.TextStyle = fyne.TextStyle{Bold: true}
+	// Move status labels (large font, shown under the board)
+	humanMoveLabel := widget.NewRichText(&widget.TextSegment{
+		Text:  "--",
+		Style: widget.RichTextStyleSubHeading,
+	})
+	cpuMoveLabel := widget.NewRichText(&widget.TextSegment{
+		Text:  "--",
+		Style: widget.RichTextStyleSubHeading,
+	})
+
+	// Helpers to update the move labels
+	setHumanMoveLabel := func(text string) {
+		fyne.Do(func() {
+			humanMoveLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
+				Text:  text,
+				Style: widget.RichTextStyleSubHeading,
+			}}
+			humanMoveLabel.Refresh()
+		})
+	}
+	setCpuMoveLabel := func(text string) {
+		fyne.Do(func() {
+			cpuMoveLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
+				Text:  text,
+				Style: widget.RichTextStyleSubHeading,
+			}}
+			cpuMoveLabel.Refresh()
+		})
+	}
 
 	// ── Game controls ──
 	var gameMu sync.Mutex
@@ -271,17 +298,63 @@ func main() {
 	colorRadio.SetSelected("White")
 	colorRadio.Horizontal = true
 
-	// Start Game button — green/success importance
+	// Color name helpers (depend on selectedColor)
+	humanColorName := func() string {
+		if selectedColor == nchess.White {
+			return "White"
+		}
+		return "Black"
+	}
+	cpuColorName := func() string {
+		if selectedColor == nchess.White {
+			return "Black (CPU)"
+		}
+		return "White (CPU)"
+	}
+
+	// resetToPreGame resets game state to post-calibration (pre-game) mode.
+	resetToPreGame := func() {
+		gameMu.Lock()
+		currentState = statePreGame
+		if stockfish != nil {
+			stockfish.Close()
+			stockfish = nil
+		}
+		gameState = nil
+		stableDiffCount = 0
+		settling = false
+		invalidMoveActive = false
+		gameMu.Unlock()
+
+		boardWidget.ClearHighlight()
+		boardWidget.ClearInvalid()
+		boardWidget.UpdatePieces(ui.StartingPosition(), true)
+		setHumanMoveLabel("--")
+		setCpuMoveLabel("--")
+		fyne.Do(func() {
+			fenLabel.SetText("FEN: (waiting for game start)")
+		})
+	}
+
+	// Start/Stop Game button — green/success importance
 	startBtn := widget.NewButton("Start Game", nil)
 	startBtn.Importance = widget.SuccessImportance
 
 	startBtn.OnTapped = func() {
 		gameMu.Lock()
-		if currentState == statePlaying {
-			gameMu.Unlock()
+		state := currentState
+		gameMu.Unlock()
+
+		// If game is in progress, stop it
+		if state == statePlaying {
+			resetToPreGame()
+			fyne.Do(func() {
+				startBtn.SetText("Start Game")
+			})
+			addDebug("Game stopped by user")
+			setStatus("Game stopped. Click Start Game to begin a new game.")
 			return
 		}
-		gameMu.Unlock()
 
 		// Check if board is calibrated
 		calibMu.Lock()
@@ -312,11 +385,11 @@ func main() {
 
 		boardWidget.ClearHighlight()
 		boardWidget.UpdatePieces(pieceGridToUI(gameState.PieceGrid()), false)
+		setHumanMoveLabel("--")
+		setCpuMoveLabel("--")
 		fyne.Do(func() {
 			fenLabel.SetText("FEN: " + gameState.FEN())
-			moveLabel.SetText("Recommended: --")
-			startBtn.SetText("Game in progress")
-			startBtn.Disable()
+			startBtn.SetText("Stop Game")
 		})
 
 		addDebug(fmt.Sprintf("Game started — playing as %s", colorRadio.Selected))
@@ -338,6 +411,10 @@ func main() {
 			// If human is Black, query Stockfish for White's first move
 			gameMu.Lock()
 			gs := gameState
+			if gs == nil {
+				gameMu.Unlock()
+				return
+			}
 			isHumanTurn := gs.IsHumanTurn()
 			gameMu.Unlock()
 
@@ -347,13 +424,27 @@ func main() {
 					difficulty = 5
 				}
 				depth := difficulty * 2
-				queryStockfish(gs, eng, depth, moveLabel, boardWidget, addDebug)
+				queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, addDebug)
 			}
 		}()
 	}
 
-	// Button row — equal-width side by side
-	buttonRow := container.NewGridWithColumns(2, calibrateBtn, startBtn)
+	// View Moves button — opens popup with move history navigation
+	viewMovesBtn := widget.NewButton("View Moves", func() {
+		gameMu.Lock()
+		gs := gameState
+		gameMu.Unlock()
+
+		if gs == nil {
+			dialog.ShowInformation("No Game", "Start a game first to view moves.", window)
+			return
+		}
+
+		showMoveHistoryWindow(myApp, gs)
+	})
+
+	// Button row — three equal-width columns
+	buttonRow := container.NewGridWithColumns(3, calibrateBtn, startBtn, viewMovesBtn)
 
 	gameControls := container.NewVBox(
 		widget.NewRichTextFromMarkdown("**Difficulty:**"),
@@ -363,7 +454,8 @@ func main() {
 		buttonRow,
 	)
 
-	analysisPanel := container.NewVBox(gameControls, fenLabel, moveLabel)
+	moveStatusRow := container.NewGridWithColumns(2, humanMoveLabel, cpuMoveLabel)
+	analysisPanel := container.NewVBox(moveStatusRow, gameControls, fenLabel)
 	rightPanel := container.NewBorder(thinkingLabel, analysisPanel, nil, nil, boardWidget)
 
 	// ── Top area ──
@@ -552,10 +644,6 @@ func main() {
 						if !settling && stableDiffCount >= stabilityThreshold {
 							settling = true
 							settleStart = time.Now()
-							// fyne.Do(func() {
-							// 	thinkingLabel.SetText("Thinking...")
-							// 	thinkingLabel.Show()
-							// })
 						}
 
 						// After 2-second settle period, infer move
@@ -583,6 +671,7 @@ func main() {
 									boardWidget.ClearInvalid()
 								}
 
+								wasHumanTurn := gs.IsHumanTurn()
 								notation := gs.MoveToAlgebraic(move)
 								if applyErr := gs.ApplyMove(move); applyErr != nil {
 									addDebug(fmt.Sprintf("Failed to apply move: %v", applyErr))
@@ -592,8 +681,13 @@ func main() {
 									boardWidget.ClearHighlight()
 									fyne.Do(func() {
 										fenLabel.SetText("FEN: " + gs.FEN())
-										moveLabel.SetText(fmt.Sprintf("Last move: %s", notation))
 									})
+
+									if wasHumanTurn {
+										setHumanMoveLabel(fmt.Sprintf("%s moved %s", humanColorName(), notation))
+									} else {
+										setCpuMoveLabel(fmt.Sprintf("%s moved %s", cpuColorName(), notation))
+									}
 
 									if gs.IsGameOver() {
 										gameMu.Lock()
@@ -602,10 +696,8 @@ func main() {
 										outcome := gs.Outcome()
 										addDebug(fmt.Sprintf("Game over: %s", outcome))
 										setStatus(fmt.Sprintf("Game over: %s", outcome))
-										boardWidget.UpdatePieces(ui.StartingPosition(), true)
 										fyne.Do(func() {
 											startBtn.SetText("Start Game")
-											startBtn.Enable()
 										})
 									} else if !gs.IsHumanTurn() && eng != nil {
 										// Engine's turn — query Stockfish
@@ -614,7 +706,7 @@ func main() {
 											difficulty = 5
 										}
 										depth := difficulty * 2
-										go queryStockfish(gs, eng, depth, moveLabel, boardWidget, addDebug)
+										go queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, addDebug)
 									}
 								}
 							}
@@ -625,7 +717,6 @@ func main() {
 						stableDiffCount = 0
 						if settling {
 							settling = false
-							// fyne.Do(func() { thinkingLabel.Hide() })
 						}
 						if invalidMoveActive {
 							invalidMoveActive = false
@@ -678,6 +769,96 @@ func main() {
 		stockfish.Close()
 	}
 	gameMu.Unlock()
+}
+
+// showMoveHistoryWindow opens a popup window with a chessboard and prev/next
+// buttons to navigate through the game's move history.
+func showMoveHistoryWindow(myApp fyne.App, gs *nchess.GameState) {
+	historyWindow := myApp.NewWindow("Move History")
+
+	historyBoard := ui.NewBoardWidget()
+
+	positions := gs.Game().Positions()
+	moves := gs.Game().Moves()
+	totalPositions := len(positions) // includes starting position
+
+	// Current index into positions (0 = starting, len(moves) = current)
+	currentIdx := totalPositions - 1
+
+	moveInfoLabel := widget.NewRichText(&widget.TextSegment{
+		Text:  "",
+		Style: widget.RichTextStyleSubHeading,
+	})
+
+	updateHistoryDisplay := func(idx int) {
+		pos := positions[idx]
+		grid := nchess.PieceGridFromPosition(pos)
+		historyBoard.UpdatePieces(pieceGridToUI(grid), false)
+
+		var text string
+		if idx == 0 {
+			text = "Starting position"
+		} else {
+			move := moves[idx-1]
+			prePos := positions[idx-1]
+			notation := chess.AlgebraicNotation{}.Encode(prePos, move)
+			moveNum := (idx + 1) / 2
+			if idx%2 == 1 {
+				text = fmt.Sprintf("%d. %s", moveNum, notation)
+			} else {
+				text = fmt.Sprintf("%d. ... %s", moveNum, notation)
+			}
+		}
+		text += fmt.Sprintf("  (%d/%d)", idx, totalPositions-1)
+
+		moveInfoLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
+			Text:  text,
+			Style: widget.RichTextStyleSubHeading,
+		}}
+		moveInfoLabel.Refresh()
+	}
+
+	prevBtn := widget.NewButton("<< Previous", nil)
+	nextBtn := widget.NewButton("Next >>", nil)
+
+	updateButtons := func(idx int) {
+		prevBtn.Enable()
+		nextBtn.Enable()
+		if idx <= 0 {
+			prevBtn.Disable()
+		}
+		if idx >= totalPositions-1 {
+			nextBtn.Disable()
+		}
+	}
+
+	prevBtn.OnTapped = func() {
+		if currentIdx > 0 {
+			currentIdx--
+			updateHistoryDisplay(currentIdx)
+			updateButtons(currentIdx)
+		}
+	}
+
+	nextBtn.OnTapped = func() {
+		if currentIdx < totalPositions-1 {
+			currentIdx++
+			updateHistoryDisplay(currentIdx)
+			updateButtons(currentIdx)
+		}
+	}
+
+	// Initialize display at current (latest) position
+	updateHistoryDisplay(currentIdx)
+	updateButtons(currentIdx)
+
+	navRow := container.NewGridWithColumns(2, prevBtn, nextBtn)
+	bottomPanel := container.NewVBox(moveInfoLabel, navRow)
+	content := container.NewBorder(nil, bottomPanel, nil, nil, historyBoard)
+
+	historyWindow.SetContent(content)
+	historyWindow.Resize(fyne.NewSize(500, 600))
+	historyWindow.Show()
 }
 
 // diffSquares returns the [row, col] pairs where expected and observed differ.
@@ -758,7 +939,7 @@ func chessPieceToUI(p chess.Piece) ui.PieceType {
 }
 
 // queryStockfish asks the engine for the best move and updates the UI.
-func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, moveLabel *widget.Label, boardWidget *ui.BoardWidget, addDebug func(string)) {
+func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, addDebug func(string)) {
 	bestMove, err := eng.BestMove(gs.Game(), depth)
 	if err != nil {
 		addDebug(fmt.Sprintf("Stockfish error: %v", err))
@@ -772,7 +953,5 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, moveLab
 	toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
 	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
 
-	fyne.Do(func() {
-		moveLabel.SetText(fmt.Sprintf("Recommended: %s", notation))
-	})
+	setCpuLabel(fmt.Sprintf("%s to move %s", cpuColor, notation))
 }
