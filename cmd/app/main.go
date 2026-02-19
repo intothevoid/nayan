@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"math/rand"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -45,10 +44,10 @@ const (
 type appState int
 
 const (
-	statePreGame   appState = iota // waiting for user to start a game
-	statePlaying                   // game in progress
-	stateGameOver                  // game finished
-	stateCpuVsCpu                  // CPU vs CPU exhibition
+	statePreGame  appState = iota // waiting for user to start a game
+	statePlaying                  // game in progress
+	stateGameOver                 // game finished
+	stateCpuVsCpu                 // CPU vs CPU exhibition
 )
 
 // stabilityThreshold is the number of consecutive frames with the same
@@ -536,7 +535,7 @@ func main() {
 
 	// ── CPU vs CPU mode ──
 	var cpuVsCpuStop chan struct{}
-	cpuVsCpuBtn = widget.NewButton("CPU vs CPU", nil)
+	cpuVsCpuBtn = widget.NewButton("Watch CPU vs CPU", nil)
 
 	cpuVsCpuBtn.OnTapped = func() {
 		gameMu.Lock()
@@ -557,7 +556,7 @@ func main() {
 			resetMoveLabels()
 			fyne.Do(func() {
 				fenLabel.SetText("FEN: (waiting for game start)")
-				cpuVsCpuBtn.SetText("CPU vs CPU")
+				cpuVsCpuBtn.SetText("Watch CPU vs CPU")
 				calibrateBtn.Enable()
 				startBtn.Enable()
 				startBtn.SetText("Start Game")
@@ -610,7 +609,8 @@ func main() {
 
 			for {
 				// Random delay 1-5 seconds
-				delay := time.Duration(1+rand.Intn(5)) * time.Second
+				// delay := time.Duration(1+rand.Intn(5)) * time.Second
+				delay := 3 * time.Second
 				select {
 				case <-stop:
 					return
@@ -626,7 +626,7 @@ func main() {
 					currentState = stateGameOver
 					gameMu.Unlock()
 					fyne.Do(func() {
-						cpuVsCpuBtn.SetText("CPU vs CPU")
+						cpuVsCpuBtn.SetText("Watch CPU vs CPU")
 						calibrateBtn.Enable()
 						startBtn.Enable()
 						startBtn.SetText("Start Game")
