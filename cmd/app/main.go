@@ -5,11 +5,12 @@ import (
 	"image"
 	"image/color"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
-	nchess "github.com/intothevoid/nayan/pkg/chess"
 	"github.com/intothevoid/nayan/pkg/camera"
+	nchess "github.com/intothevoid/nayan/pkg/chess"
 	"github.com/intothevoid/nayan/pkg/engine"
 	"github.com/intothevoid/nayan/pkg/ui"
 	"github.com/intothevoid/nayan/pkg/vision"
@@ -192,7 +193,7 @@ func main() {
 	calibMode := calibIdle
 	calibCorners := make([]image.Point, 0, 4)
 	var manualCorners []image.Point // final 4 corners for warping
-	calibDoneFrame := 0            // frame counter for "Calibration complete!" overlay
+	calibDoneFrame := 0             // frame counter for "Calibration complete!" overlay
 
 	// Reusable calibration start function
 	startCalibration := func() {
@@ -240,9 +241,24 @@ func main() {
 	stableDiffCount := 0
 	var pendingOcc [8][8]bool
 
+	// Settle period: wait 2 seconds after stability before inferring a move
+	settling := false
+	var settleStart time.Time
+
 	// Invalid move state
 	invalidMoveActive := false
 	var invalidSoundStop chan struct{}
+
+	// Difficulty select (1-10), maps to Stockfish depth
+	difficultyOptions := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
+	difficultySelect := widget.NewSelect(difficultyOptions, nil)
+	difficultySelect.SetSelected("5")
+
+	// "Thinking..." label shown during settle period
+	thinkingLabel := widget.NewLabel("")
+	thinkingLabel.TextStyle = fyne.TextStyle{Bold: true, Italic: true}
+	thinkingLabel.Alignment = fyne.TextAlignCenter
+	thinkingLabel.Hidden = true
 
 	selectedColor := nchess.White
 	colorRadio := widget.NewRadioGroup([]string{"White", "Black"}, func(value string) {
@@ -290,10 +306,10 @@ func main() {
 		gameState = nchess.NewGame(selectedColor)
 		currentState = statePlaying
 		stableDiffCount = 0
+		settling = false
 		invalidMoveActive = false
 		gameMu.Unlock()
 
-		boardWidget.ClearArrow()
 		boardWidget.ClearHighlight()
 		boardWidget.UpdatePieces(pieceGridToUI(gameState.PieceGrid()), false)
 		fyne.Do(func() {
@@ -326,7 +342,12 @@ func main() {
 			gameMu.Unlock()
 
 			if !isHumanTurn {
-				queryStockfish(gs, eng, moveLabel, boardWidget, addDebug)
+				difficulty, _ := strconv.Atoi(difficultySelect.Selected)
+				if difficulty < 1 {
+					difficulty = 5
+				}
+				depth := difficulty * 2
+				queryStockfish(gs, eng, depth, moveLabel, boardWidget, addDebug)
 			}
 		}()
 	}
@@ -335,13 +356,15 @@ func main() {
 	buttonRow := container.NewGridWithColumns(2, calibrateBtn, startBtn)
 
 	gameControls := container.NewVBox(
+		widget.NewRichTextFromMarkdown("**Difficulty:**"),
+		difficultySelect,
 		widget.NewRichTextFromMarkdown("**Play as:**"),
 		colorRadio,
 		buttonRow,
 	)
 
 	analysisPanel := container.NewVBox(gameControls, fenLabel, moveLabel)
-	rightPanel := container.NewBorder(nil, analysisPanel, nil, nil, boardWidget)
+	rightPanel := container.NewBorder(thinkingLabel, analysisPanel, nil, nil, boardWidget)
 
 	// ── Top area ──
 	topSplit := container.NewHSplit(leftPanel, rightPanel)
@@ -517,9 +540,28 @@ func main() {
 						} else {
 							pendingOcc = occupancy
 							stableDiffCount = 1
+							// Occupancy changed during settle — reset
+							if settling {
+								settling = false
+								fyne.Do(func() { thinkingLabel.Hide() })
+							}
 						}
 
-						if stableDiffCount == stabilityThreshold {
+						// Start settle period once stable enough
+						if !settling && stableDiffCount >= stabilityThreshold {
+							settling = true
+							settleStart = time.Now()
+							// fyne.Do(func() {
+							// 	thinkingLabel.SetText("Thinking...")
+							// 	thinkingLabel.Show()
+							// })
+						}
+
+						// After 2-second settle period, infer move
+						if settling && time.Since(settleStart) >= 2*time.Second {
+							settling = false
+							fyne.Do(func() { thinkingLabel.Hide() })
+
 							move, inferErr := gs.InferMove(occupancy)
 							if inferErr != nil {
 								// Invalid move — flash differing squares and play alert
@@ -546,7 +588,7 @@ func main() {
 								} else {
 									addDebug(fmt.Sprintf("Move detected: %s", notation))
 									boardWidget.UpdatePieces(pieceGridToUI(gs.PieceGrid()), false)
-									boardWidget.ClearArrow()
+									boardWidget.ClearHighlight()
 									fyne.Do(func() {
 										fenLabel.SetText("FEN: " + gs.FEN())
 										moveLabel.SetText(fmt.Sprintf("Last move: %s", notation))
@@ -566,7 +608,12 @@ func main() {
 										})
 									} else if !gs.IsHumanTurn() && eng != nil {
 										// Engine's turn — query Stockfish
-										go queryStockfish(gs, eng, moveLabel, boardWidget, addDebug)
+										difficulty, _ := strconv.Atoi(difficultySelect.Selected)
+										if difficulty < 1 {
+											difficulty = 5
+										}
+										depth := difficulty * 2
+										go queryStockfish(gs, eng, depth, moveLabel, boardWidget, addDebug)
 									}
 								}
 							}
@@ -575,6 +622,10 @@ func main() {
 					} else {
 						// Occupancy matches expected — reset stability counter
 						stableDiffCount = 0
+						if settling {
+							settling = false
+							// fyne.Do(func() { thinkingLabel.Hide() })
+						}
 						if invalidMoveActive {
 							invalidMoveActive = false
 							close(invalidSoundStop)
@@ -641,7 +692,7 @@ func diffSquares(expected, observed [8][8]bool) [][2]int {
 	return diffs
 }
 
-// invalidMoveAlertLoop plays an alert sound immediately, then every 10 seconds,
+// invalidMoveAlertLoop plays an alert sound immediately, then every 4 seconds,
 // until the stop channel is closed.
 func invalidMoveAlertLoop(stop <-chan struct{}) {
 	playAlertSound()
@@ -706,8 +757,8 @@ func chessPieceToUI(p chess.Piece) ui.PieceType {
 }
 
 // queryStockfish asks the engine for the best move and updates the UI.
-func queryStockfish(gs *nchess.GameState, eng *engine.Engine, moveLabel *widget.Label, boardWidget *ui.BoardWidget, addDebug func(string)) {
-	bestMove, err := eng.BestMove(gs.Game(), 15)
+func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, moveLabel *widget.Label, boardWidget *ui.BoardWidget, addDebug func(string)) {
+	bestMove, err := eng.BestMove(gs.Game(), depth)
 	if err != nil {
 		addDebug(fmt.Sprintf("Stockfish error: %v", err))
 		return
@@ -718,7 +769,7 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, moveLabel *widget.
 
 	fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
 	toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
-	boardWidget.ShowArrow(fromRow, fromCol, toRow, toCol)
+	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
 
 	fyne.Do(func() {
 		moveLabel.SetText(fmt.Sprintf("Recommended: %s", notation))
