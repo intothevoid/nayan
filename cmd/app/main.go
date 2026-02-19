@@ -506,11 +506,12 @@ func main() {
 				warpedMat := vision.WarpBoard(*mat, warpCorners)
 
 				// Detect pieces using variance-based detection (no reference needed)
-				occupancy := vision.ScanBoardAbsolute(warpedMat)
+				occupancy, metrics := vision.ScanBoardDebug(warpedMat)
 				vision.DrawOccupancy(&warpedMat, occupancy)
 
 				if occupancy != lastOccupancy {
 					vision.PrintOccupancy(occupancy)
+					fmt.Print(vision.FormatMetrics(metrics))
 
 					count := 0
 					for r := 0; r < 8; r++ {
