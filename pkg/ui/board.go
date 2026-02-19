@@ -17,6 +17,7 @@ var (
 	highlightFrom    = color.NRGBA{R: 0x00, G: 0x88, B: 0xff, A: 0x80} // blue semi-transparent
 	highlightTo      = color.NRGBA{R: 0x00, G: 0xcc, B: 0x44, A: 0x80} // green semi-transparent
 	highlightInvalid = color.NRGBA{R: 0xff, G: 0x00, B: 0x00, A: 0x80} // red semi-transparent
+	highlightCheck   = color.NRGBA{R: 0xff, G: 0x20, B: 0x20, A: 0xbb} // red, more opaque
 )
 
 // greyedTranslucency is the translucency applied to pieces in pre-game mode.
@@ -40,6 +41,9 @@ type BoardWidget struct {
 	squares    [8][8]*canvas.Rectangle
 	highlights [8][8]*canvas.Rectangle
 	pieceImgs  [8][8]*canvas.Image
+	checkRect  *canvas.Rectangle // overlay for king in check
+	checkRow   int               // row of checked king (-1 = hidden)
+	checkCol   int               // col of checked king
 	labels     []fyne.CanvasObject
 	root       *fyne.Container
 }
@@ -47,11 +51,11 @@ type BoardWidget struct {
 // NewBoardWidget creates a new virtual chessboard widget.
 // It initializes with the standard starting position in greyed-out mode.
 func NewBoardWidget() *BoardWidget {
-	b := &BoardWidget{}
+	b := &BoardWidget{checkRow: -1}
 	b.ExtendBaseWidget(b)
 
-	// Build squares, highlights, piece images, arrow, and labels
-	objects := make([]fyne.CanvasObject, 0, 64+64+64+32)
+	// Build squares, highlights, piece images, check overlay, and labels
+	objects := make([]fyne.CanvasObject, 0, 64+64+64+1+32)
 
 	startPos := StartingPosition()
 	b.pieces = startPos
@@ -86,6 +90,11 @@ func NewBoardWidget() *BoardWidget {
 			objects = append(objects, img)
 		}
 	}
+
+	// Check highlight overlay (single rectangle, layered on top of pieces)
+	b.checkRect = canvas.NewRectangle(highlightCheck)
+	b.checkRect.Hidden = true
+	objects = append(objects, b.checkRect)
 
 	// File labels (a-h) along the bottom (indices 0-7)
 	for col := 0; col < 8; col++ {
@@ -185,6 +194,31 @@ func (b *BoardWidget) clearHighlightsUnsafe() {
 			b.highlights[row][col].Refresh()
 		}
 	}
+}
+
+// HighlightCheck shows a red overlay on the given king square (check indicator).
+func (b *BoardWidget) HighlightCheck(row, col int) {
+	b.mu.Lock()
+	b.checkRow = row
+	b.checkCol = col
+	b.mu.Unlock()
+	fyne.Do(func() {
+		b.checkRect.Hidden = false
+		b.checkRect.Refresh()
+		// Trigger layout to reposition the check rectangle
+		b.Refresh()
+	})
+}
+
+// ClearCheck hides the check indicator.
+func (b *BoardWidget) ClearCheck() {
+	b.mu.Lock()
+	b.checkRow = -1
+	b.mu.Unlock()
+	fyne.Do(func() {
+		b.checkRect.Hidden = true
+		b.checkRect.Refresh()
+	})
 }
 
 // FlashInvalid starts flashing red highlights on the given squares.
@@ -313,6 +347,17 @@ func (r *boardRenderer) Layout(size fyne.Size) {
 			r.b.pieceImgs[row][col].Move(fyne.NewPos(x+inset, y+inset))
 			r.b.pieceImgs[row][col].Resize(fyne.NewSize(sqSize-2*inset, sqSize-2*inset))
 		}
+	}
+
+	// Position check highlight over the checked king's square
+	r.b.mu.Lock()
+	cRow, cCol := r.b.checkRow, r.b.checkCol
+	r.b.mu.Unlock()
+	if cRow >= 0 {
+		cx := offsetX + float32(cCol)*sqSize
+		cy := offsetY + float32(cRow)*sqSize
+		r.b.checkRect.Move(fyne.NewPos(cx, cy))
+		r.b.checkRect.Resize(fyne.NewSize(sqSize, sqSize))
 	}
 
 	// File labels (a-h) below the board (indices 0-7)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math/rand"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -43,9 +45,10 @@ const (
 type appState int
 
 const (
-	statePreGame  appState = iota // waiting for user to start a game
-	statePlaying                  // game in progress
-	stateGameOver                 // game finished
+	statePreGame   appState = iota // waiting for user to start a game
+	statePlaying                   // game in progress
+	stateGameOver                  // game finished
+	stateCpuVsCpu                  // CPU vs CPU exhibition
 )
 
 // stabilityThreshold is the number of consecutive frames with the same
@@ -55,6 +58,35 @@ const stabilityThreshold = 5
 
 // Corner labels in selection order
 var cornerNames = [4]string{"top-left", "top-right", "bottom-right", "bottom-left"}
+
+// Move label styles — left-aligned for human, right-aligned for CPU.
+// The "active" variants use the primary accent color for the last-updated label.
+var (
+	humanLabelStyle = widget.RichTextStyle{
+		Alignment: fyne.TextAlignLeading,
+		ColorName: theme.ColorNameForeground,
+		SizeName:  theme.SizeNameSubHeadingText,
+		TextStyle: fyne.TextStyle{Bold: true},
+	}
+	humanLabelActiveStyle = widget.RichTextStyle{
+		Alignment: fyne.TextAlignLeading,
+		ColorName: theme.ColorNamePrimary,
+		SizeName:  theme.SizeNameSubHeadingText,
+		TextStyle: fyne.TextStyle{Bold: true},
+	}
+	cpuLabelStyle = widget.RichTextStyle{
+		Alignment: fyne.TextAlignTrailing,
+		ColorName: theme.ColorNameForeground,
+		SizeName:  theme.SizeNameSubHeadingText,
+		TextStyle: fyne.TextStyle{Bold: true},
+	}
+	cpuLabelActiveStyle = widget.RichTextStyle{
+		Alignment: fyne.TextAlignTrailing,
+		ColorName: theme.ColorNamePrimary,
+		SizeName:  theme.SizeNameSubHeadingText,
+		TextStyle: fyne.TextStyle{Bold: true},
+	}
+)
 
 // fixedHeightLayout gives its children a fixed height and the full available width.
 type fixedHeightLayout struct {
@@ -231,28 +263,53 @@ func main() {
 	// Move status labels (large font, shown under the board)
 	humanMoveLabel := widget.NewRichText(&widget.TextSegment{
 		Text:  "--",
-		Style: widget.RichTextStyleSubHeading,
+		Style: humanLabelStyle,
 	})
 	cpuMoveLabel := widget.NewRichText(&widget.TextSegment{
 		Text:  "--",
-		Style: widget.RichTextStyleSubHeading,
+		Style: cpuLabelStyle,
 	})
 
-	// Helpers to update the move labels
+	// Helpers to update the move labels. The last-updated label gets the
+	// primary accent color; the other reverts to normal foreground.
 	setHumanMoveLabel := func(text string) {
 		fyne.Do(func() {
 			humanMoveLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
 				Text:  text,
-				Style: widget.RichTextStyleSubHeading,
+				Style: humanLabelActiveStyle,
 			}}
 			humanMoveLabel.Refresh()
+			// Dim the CPU label
+			if seg, ok := cpuMoveLabel.Segments[0].(*widget.TextSegment); ok {
+				seg.Style = cpuLabelStyle
+				cpuMoveLabel.Refresh()
+			}
 		})
 	}
 	setCpuMoveLabel := func(text string) {
 		fyne.Do(func() {
 			cpuMoveLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
 				Text:  text,
-				Style: widget.RichTextStyleSubHeading,
+				Style: cpuLabelActiveStyle,
+			}}
+			cpuMoveLabel.Refresh()
+			// Dim the human label
+			if seg, ok := humanMoveLabel.Segments[0].(*widget.TextSegment); ok {
+				seg.Style = humanLabelStyle
+				humanMoveLabel.Refresh()
+			}
+		})
+	}
+	resetMoveLabels := func() {
+		fyne.Do(func() {
+			humanMoveLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
+				Text:  "--",
+				Style: humanLabelStyle,
+			}}
+			humanMoveLabel.Refresh()
+			cpuMoveLabel.Segments = []widget.RichTextSegment{&widget.TextSegment{
+				Text:  "--",
+				Style: cpuLabelStyle,
 			}}
 			cpuMoveLabel.Refresh()
 		})
@@ -275,6 +332,33 @@ func main() {
 	// Invalid move state
 	invalidMoveActive := false
 	var invalidSoundStop chan struct{}
+
+	// Track last Stockfish recommendation so we can restore highlights
+	// after an invalid-move correction.
+	var recMu sync.Mutex
+	var recFromRow, recFromCol, recToRow, recToCol int
+	recActive := false
+
+	storeRecommendation := func(fR, fC, tR, tC int) {
+		recMu.Lock()
+		recFromRow, recFromCol, recToRow, recToCol = fR, fC, tR, tC
+		recActive = true
+		recMu.Unlock()
+	}
+	clearRecommendation := func() {
+		recMu.Lock()
+		recActive = false
+		recMu.Unlock()
+	}
+	restoreRecommendation := func() {
+		recMu.Lock()
+		active := recActive
+		fR, fC, tR, tC := recFromRow, recFromCol, recToRow, recToCol
+		recMu.Unlock()
+		if active {
+			boardWidget.HighlightMove(fR, fC, tR, tC)
+		}
+	}
 
 	// Difficulty select (1-10), maps to Stockfish depth
 	difficultyOptions := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
@@ -326,11 +410,12 @@ func main() {
 		invalidMoveActive = false
 		gameMu.Unlock()
 
+		clearRecommendation()
 		boardWidget.ClearHighlight()
+		boardWidget.ClearCheck()
 		boardWidget.ClearInvalid()
 		boardWidget.UpdatePieces(ui.StartingPosition(), true)
-		setHumanMoveLabel("--")
-		setCpuMoveLabel("--")
+		resetMoveLabels()
 		fyne.Do(func() {
 			fenLabel.SetText("FEN: (waiting for game start)")
 		})
@@ -339,6 +424,9 @@ func main() {
 	// Start/Stop Game button — green/success importance
 	startBtn := widget.NewButton("Start Game", nil)
 	startBtn.Importance = widget.SuccessImportance
+
+	// Forward-declare cpuVsCpuBtn so startBtn.OnTapped can reference it
+	var cpuVsCpuBtn *widget.Button
 
 	startBtn.OnTapped = func() {
 		gameMu.Lock()
@@ -350,6 +438,7 @@ func main() {
 			resetToPreGame()
 			fyne.Do(func() {
 				startBtn.SetText("Start Game")
+				cpuVsCpuBtn.Enable()
 			})
 			addDebug("Game stopped by user")
 			setStatus("Game stopped. Click Start Game to begin a new game.")
@@ -383,13 +472,15 @@ func main() {
 		invalidMoveActive = false
 		gameMu.Unlock()
 
+		clearRecommendation()
 		boardWidget.ClearHighlight()
+		boardWidget.ClearCheck()
 		boardWidget.UpdatePieces(pieceGridToUI(gameState.PieceGrid()), false)
-		setHumanMoveLabel("--")
-		setCpuMoveLabel("--")
+		resetMoveLabels()
 		fyne.Do(func() {
 			fenLabel.SetText("FEN: " + gameState.FEN())
 			startBtn.SetText("Stop Game")
+			cpuVsCpuBtn.Disable()
 		})
 
 		addDebug(fmt.Sprintf("Game started — playing as %s", colorRadio.Selected))
@@ -424,7 +515,7 @@ func main() {
 					difficulty = 5
 				}
 				depth := difficulty * 2
-				queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, addDebug)
+				queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug)
 			}
 		}()
 	}
@@ -443,15 +534,165 @@ func main() {
 		showMoveHistoryWindow(myApp, gs)
 	})
 
-	// Button row — three equal-width columns
-	buttonRow := container.NewGridWithColumns(3, calibrateBtn, startBtn, viewMovesBtn)
+	// ── CPU vs CPU mode ──
+	var cpuVsCpuStop chan struct{}
+	cpuVsCpuBtn = widget.NewButton("CPU vs CPU", nil)
+
+	cpuVsCpuBtn.OnTapped = func() {
+		gameMu.Lock()
+		state := currentState
+		gameMu.Unlock()
+
+		// If CPU vs CPU is running, stop it
+		if state == stateCpuVsCpu {
+			close(cpuVsCpuStop)
+			gameMu.Lock()
+			currentState = statePreGame
+			gameState = nil
+			gameMu.Unlock()
+
+			boardWidget.ClearHighlight()
+			boardWidget.ClearCheck()
+			boardWidget.UpdatePieces(ui.StartingPosition(), true)
+			resetMoveLabels()
+			fyne.Do(func() {
+				fenLabel.SetText("FEN: (waiting for game start)")
+				cpuVsCpuBtn.SetText("CPU vs CPU")
+				calibrateBtn.Enable()
+				startBtn.Enable()
+				startBtn.SetText("Start Game")
+				viewMovesBtn.Enable()
+			})
+			addDebug("CPU vs CPU stopped")
+			setStatus("CPU vs CPU stopped.")
+			return
+		}
+
+		// Start CPU vs CPU
+		gameMu.Lock()
+		gs := nchess.NewGame(nchess.White)
+		gameState = gs
+		currentState = stateCpuVsCpu
+		gameMu.Unlock()
+
+		cpuVsCpuStop = make(chan struct{})
+		boardWidget.ClearHighlight()
+		boardWidget.ClearCheck()
+		boardWidget.UpdatePieces(pieceGridToUI(gs.PieceGrid()), false)
+		resetMoveLabels()
+
+		fyne.Do(func() {
+			fenLabel.SetText("FEN: " + gs.FEN())
+			cpuVsCpuBtn.SetText("Stop CPU vs CPU")
+			calibrateBtn.Disable()
+			startBtn.Disable()
+			viewMovesBtn.Enable()
+		})
+
+		addDebug("CPU vs CPU started")
+		setStatus("CPU vs CPU game in progress...")
+
+		difficulty, _ := strconv.Atoi(difficultySelect.Selected)
+		if difficulty < 1 {
+			difficulty = 5
+		}
+		depth := difficulty * 2
+
+		stop := cpuVsCpuStop
+		go func() {
+			eng, err := engine.NewEngine()
+			if err != nil {
+				addDebug(fmt.Sprintf("Stockfish not available: %v", err))
+				setStatus("Cannot start CPU vs CPU: Stockfish not found.")
+				return
+			}
+			defer eng.Close()
+
+			for {
+				// Random delay 1-5 seconds
+				delay := time.Duration(1+rand.Intn(5)) * time.Second
+				select {
+				case <-stop:
+					return
+				case <-time.After(delay):
+				}
+
+				// Check if game is over
+				if gs.IsGameOver() {
+					outcome := gs.Outcome()
+					addDebug(fmt.Sprintf("CPU vs CPU game over: %s", outcome))
+					setStatus(fmt.Sprintf("CPU vs CPU: %s", outcome))
+					gameMu.Lock()
+					currentState = stateGameOver
+					gameMu.Unlock()
+					fyne.Do(func() {
+						cpuVsCpuBtn.SetText("CPU vs CPU")
+						calibrateBtn.Enable()
+						startBtn.Enable()
+						startBtn.SetText("Start Game")
+						viewMovesBtn.Enable()
+						dialog.ShowConfirm("Game Over",
+							outcome+"\n\nWould you like to reset the board?",
+							func(yes bool) {
+								if yes {
+									resetToPreGame()
+								}
+							}, window)
+					})
+					return
+				}
+
+				bestMove, err := eng.BestMove(gs.Game(), depth)
+				if err != nil {
+					addDebug(fmt.Sprintf("CPU vs CPU engine error: %v", err))
+					return
+				}
+
+				// Determine which color is moving
+				isWhiteTurn := gs.Game().Position().Turn() == chess.White
+				notation := chess.AlgebraicNotation{}.Encode(gs.Game().Position(), bestMove)
+
+				if applyErr := gs.ApplyMove(bestMove); applyErr != nil {
+					addDebug(fmt.Sprintf("CPU vs CPU apply error: %v", applyErr))
+					return
+				}
+
+				fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
+				toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
+				boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
+				boardWidget.UpdatePieces(pieceGridToUI(gs.PieceGrid()), false)
+
+				// Check indicator
+				boardWidget.ClearCheck()
+				if kR, kC, inCheck := gs.CheckedKingSquare(bestMove); inCheck {
+					boardWidget.HighlightCheck(kR, kC)
+				}
+
+				if isWhiteTurn {
+					setHumanMoveLabel(fmt.Sprintf("White moved %s", notation))
+				} else {
+					setCpuMoveLabel(fmt.Sprintf("Black moved %s", notation))
+				}
+
+				fyne.Do(func() {
+					fenLabel.SetText("FEN: " + gs.FEN())
+				})
+				addDebug(fmt.Sprintf("CPU vs CPU: %s", notation))
+			}
+		}()
+	}
+
+	// Button rows — two rows of two buttons each
+	buttonRow1 := container.NewGridWithColumns(2, calibrateBtn, startBtn)
+	buttonRow2 := container.NewGridWithColumns(2, viewMovesBtn, cpuVsCpuBtn)
 
 	gameControls := container.NewVBox(
 		widget.NewRichTextFromMarkdown("**Difficulty:**"),
 		difficultySelect,
 		widget.NewRichTextFromMarkdown("**Play as:**"),
 		colorRadio,
-		buttonRow,
+		buttonRow1,
+		buttonRow2,
 	)
 
 	moveStatusRow := container.NewGridWithColumns(2, humanMoveLabel, cpuMoveLabel)
@@ -679,6 +920,14 @@ func main() {
 									addDebug(fmt.Sprintf("Move detected: %s", notation))
 									boardWidget.UpdatePieces(pieceGridToUI(gs.PieceGrid()), false)
 									boardWidget.ClearHighlight()
+									clearRecommendation()
+
+									// Check indicator
+									boardWidget.ClearCheck()
+									if kR, kC, inCheck := gs.CheckedKingSquare(move); inCheck {
+										boardWidget.HighlightCheck(kR, kC)
+									}
+
 									fyne.Do(func() {
 										fenLabel.SetText("FEN: " + gs.FEN())
 									})
@@ -698,6 +947,14 @@ func main() {
 										setStatus(fmt.Sprintf("Game over: %s", outcome))
 										fyne.Do(func() {
 											startBtn.SetText("Start Game")
+											cpuVsCpuBtn.Enable()
+											dialog.ShowConfirm("Game Over",
+												outcome+"\n\nWould you like to start a new game?",
+												func(yes bool) {
+													if yes {
+														resetToPreGame()
+													}
+												}, window)
 										})
 									} else if !gs.IsHumanTurn() && eng != nil {
 										// Engine's turn — query Stockfish
@@ -706,7 +963,7 @@ func main() {
 											difficulty = 5
 										}
 										depth := difficulty * 2
-										go queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, addDebug)
+										go queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug)
 									}
 								}
 							}
@@ -722,6 +979,8 @@ func main() {
 							invalidMoveActive = false
 							close(invalidSoundStop)
 							boardWidget.ClearInvalid()
+							// Restore Stockfish recommendation highlights
+							restoreRecommendation()
 							setStatus("Board corrected. Your move.")
 							addDebug("Board matches expected position")
 						}
@@ -939,7 +1198,7 @@ func chessPieceToUI(p chess.Piece) ui.PieceType {
 }
 
 // queryStockfish asks the engine for the best move and updates the UI.
-func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, addDebug func(string)) {
+func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, storeRec func(int, int, int, int), addDebug func(string)) {
 	bestMove, err := eng.BestMove(gs.Game(), depth)
 	if err != nil {
 		addDebug(fmt.Sprintf("Stockfish error: %v", err))
@@ -951,6 +1210,7 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColo
 
 	fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
 	toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
+	storeRec(fromRow, fromCol, toRow, toCol)
 	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
 
 	setCpuLabel(fmt.Sprintf("%s to move %s", cpuColor, notation))

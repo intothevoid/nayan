@@ -158,6 +158,29 @@ func (gs *GameState) PieceGrid() [8][8]chess.Piece {
 	return grid
 }
 
+// CheckedKingSquare returns the row/col of the king in check after the given
+// move was applied. Call this AFTER ApplyMove. Returns inCheck=false if the
+// move does not give check.
+func (gs *GameState) CheckedKingSquare(m *chess.Move) (row, col int, inCheck bool) {
+	if !m.HasTag(chess.Check) {
+		return 0, 0, false
+	}
+	pos := gs.game.Position()
+	turn := pos.Turn() // side to move is the one in check
+	kingPiece := chess.WhiteKing
+	if turn == chess.Black {
+		kingPiece = chess.BlackKing
+	}
+	board := pos.Board()
+	for sq := chess.A1; sq <= chess.H8; sq++ {
+		if board.Piece(sq) == kingPiece {
+			row, col = RowColFromSquare(sq)
+			return row, col, true
+		}
+	}
+	return 0, 0, false
+}
+
 // PieceGridFromPosition returns a piece grid from any chess.Position.
 // Useful for displaying historical positions (e.g. move history viewer).
 func PieceGridFromPosition(pos *chess.Position) [8][8]chess.Piece {
