@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"image"
 	"image/color"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +59,10 @@ const stabilityThreshold = 5
 
 // Corner labels in selection order
 var cornerNames = [4]string{"top-left", "top-right", "bottom-right", "bottom-left"}
+
+// speak state — protected by speakMu so a new utterance kills any in-progress one.
+var speakMu sync.Mutex
+var speakCmd *exec.Cmd
 
 // Move label styles — left-aligned for human, right-aligned for CPU.
 // The "active" variants use the primary accent color for the last-updated label.
@@ -381,6 +387,19 @@ func main() {
 	colorRadio.SetSelected("White")
 	colorRadio.Horizontal = true
 
+	// Voiceover controls
+	voices := availableVoices()
+	voiceoverCheck := widget.NewCheck("Voiceover", nil)
+	voiceSelect := widget.NewSelect(voices, nil)
+	defaultVoice := voices[0]
+	for _, v := range voices {
+		if v == "Samantha" {
+			defaultVoice = "Samantha"
+			break
+		}
+	}
+	voiceSelect.SetSelected(defaultVoice)
+
 	// Color name helpers (depend on selectedColor)
 	humanColorName := func() string {
 		if selectedColor == nchess.White {
@@ -620,6 +639,9 @@ func main() {
 				// Check if game is over
 				if gs.IsGameOver() {
 					outcome := gs.Outcome()
+					if voiceoverCheck.Checked {
+						speak(voiceSelect.Selected, outcome)
+					}
 					addDebug(fmt.Sprintf("CPU vs CPU game over: %s", outcome))
 					setStatus(fmt.Sprintf("CPU vs CPU: %s", outcome))
 					gameMu.Lock()
@@ -649,8 +671,9 @@ func main() {
 				}
 
 				// Determine which color is moving
-				isWhiteTurn := gs.Game().Position().Turn() == chess.White
-				notation := chess.AlgebraicNotation{}.Encode(gs.Game().Position(), bestMove)
+				prePos := gs.Game().Position()
+				isWhiteTurn := prePos.Turn() == chess.White
+				notation := chess.AlgebraicNotation{}.Encode(prePos, bestMove)
 
 				if applyErr := gs.ApplyMove(bestMove); applyErr != nil {
 					addDebug(fmt.Sprintf("CPU vs CPU apply error: %v", applyErr))
@@ -674,6 +697,15 @@ func main() {
 					setCpuMoveLabel(fmt.Sprintf("Black moved %s", notation))
 				}
 
+				// Voiceover
+				if voiceoverCheck.Checked {
+					colorName := "White"
+					if !isWhiteTurn {
+						colorName = "Black"
+					}
+					speak(voiceSelect.Selected, moveCommentary(colorName, bestMove, prePos))
+				}
+
 				fyne.Do(func() {
 					fenLabel.SetText("FEN: " + gs.FEN())
 				})
@@ -686,11 +718,14 @@ func main() {
 	buttonRow1 := container.NewGridWithColumns(2, calibrateBtn, startBtn)
 	buttonRow2 := container.NewGridWithColumns(2, viewMovesBtn, cpuVsCpuBtn)
 
+	voiceoverRow := container.NewBorder(nil, nil, voiceoverCheck, nil, voiceSelect)
+
 	gameControls := container.NewVBox(
 		widget.NewRichTextFromMarkdown("**Difficulty:**"),
 		difficultySelect,
 		widget.NewRichTextFromMarkdown("**Play as:**"),
 		colorRadio,
+		voiceoverRow,
 		buttonRow1,
 		buttonRow2,
 	)
@@ -913,6 +948,7 @@ func main() {
 								}
 
 								wasHumanTurn := gs.IsHumanTurn()
+								prePos := gs.Game().Position()
 								notation := gs.MoveToAlgebraic(move)
 								if applyErr := gs.ApplyMove(move); applyErr != nil {
 									addDebug(fmt.Sprintf("Failed to apply move: %v", applyErr))
@@ -938,11 +974,23 @@ func main() {
 										setCpuMoveLabel(fmt.Sprintf("%s moved %s", cpuColorName(), notation))
 									}
 
+									// Voiceover
+									if voiceoverCheck.Checked {
+										colorName := "White"
+										if prePos.Turn() == chess.Black {
+											colorName = "Black"
+										}
+										speak(voiceSelect.Selected, moveCommentary(colorName, move, prePos))
+									}
+
 									if gs.IsGameOver() {
 										gameMu.Lock()
 										currentState = stateGameOver
 										gameMu.Unlock()
 										outcome := gs.Outcome()
+										if voiceoverCheck.Checked {
+											speak(voiceSelect.Selected, outcome)
+										}
 										addDebug(fmt.Sprintf("Game over: %s", outcome))
 										setStatus(fmt.Sprintf("Game over: %s", outcome))
 										fyne.Do(func() {
@@ -1214,4 +1262,92 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColo
 	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
 
 	setCpuLabel(fmt.Sprintf("%s to move %s", cpuColor, notation))
+}
+
+// availableVoices returns the list of macOS TTS voices by parsing `say -v ?`.
+func availableVoices() []string {
+	out, err := exec.Command("say", "-v", "?").Output()
+	if err != nil {
+		return []string{"Samantha"}
+	}
+	var voices []string
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Each line: "VoiceName           xx_XX    # description"
+		idx := strings.Index(line, "  ")
+		if idx > 0 {
+			voices = append(voices, strings.TrimSpace(line[:idx]))
+		}
+	}
+	if len(voices) == 0 {
+		return []string{"Samantha"}
+	}
+	return voices
+}
+
+// pieceName returns a human-readable name for a chess piece.
+func pieceName(p chess.Piece) string {
+	switch p {
+	case chess.WhiteKing, chess.BlackKing:
+		return "king"
+	case chess.WhiteQueen, chess.BlackQueen:
+		return "queen"
+	case chess.WhiteRook, chess.BlackRook:
+		return "rook"
+	case chess.WhiteBishop, chess.BlackBishop:
+		return "bishop"
+	case chess.WhiteKnight, chess.BlackKnight:
+		return "knight"
+	case chess.WhitePawn, chess.BlackPawn:
+		return "pawn"
+	default:
+		return ""
+	}
+}
+
+// squareName returns a spoken-friendly name like "e 4" from a chess.Square.
+func squareName(sq chess.Square) string {
+	return fmt.Sprintf("%c %d", rune('a')+rune(sq.File()), int(sq.Rank())+1)
+}
+
+// speak runs the macOS `say` command in a goroutine. A new utterance kills any
+// in-progress one so speech never overlaps.
+func speak(voice, text string) {
+	go func() {
+		speakMu.Lock()
+		if speakCmd != nil && speakCmd.Process != nil {
+			speakCmd.Process.Kill()
+		}
+		cmd := exec.Command("say", "-v", voice, text)
+		speakCmd = cmd
+		speakMu.Unlock()
+		cmd.Run()
+	}()
+}
+
+// moveCommentary builds a natural-language phrase describing a chess move.
+func moveCommentary(colorName string, move *chess.Move, pos *chess.Position) string {
+	piece := pos.Board().Piece(move.S1())
+	dest := squareName(move.S2())
+	name := pieceName(piece)
+
+	if move.HasTag(chess.KingSideCastle) {
+		return colorName + " castles king side"
+	}
+	if move.HasTag(chess.QueenSideCastle) {
+		return colorName + " castles queen side"
+	}
+
+	verb := "to"
+	if move.HasTag(chess.Capture) || move.HasTag(chess.EnPassant) {
+		verb = "takes"
+	}
+
+	text := fmt.Sprintf("%s %s %s %s", colorName, name, verb, dest)
+
+	if move.HasTag(chess.Check) {
+		text += ". Check!"
+	}
+	return text
 }
