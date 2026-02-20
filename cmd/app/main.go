@@ -61,8 +61,10 @@ const stabilityThreshold = 5
 var cornerNames = [4]string{"top-left", "top-right", "bottom-right", "bottom-left"}
 
 // speak state — protected by speakMu so a new utterance kills any in-progress one.
-var speakMu sync.Mutex
-var speakCmd *exec.Cmd
+var (
+	speakMu  sync.Mutex
+	speakCmd *exec.Cmd
+)
 
 // Move label styles — left-aligned for human, right-aligned for CPU.
 // The "active" variants use the primary accent color for the last-updated label.
@@ -399,6 +401,8 @@ func main() {
 		}
 	}
 	voiceSelect.SetSelected(defaultVoice)
+	cpuOnlyCheck := widget.NewCheck("Voiceover CPU Only", nil)
+	cpuOnlyCheck.SetChecked(true) // true by default
 
 	// Color name helpers (depend on selectedColor)
 	humanColorName := func() string {
@@ -533,7 +537,16 @@ func main() {
 					difficulty = 5
 				}
 				depth := difficulty * 2
-				queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug)
+				speakFn := func(move *chess.Move, pos *chess.Position) {
+					if voiceoverCheck.Checked {
+						colorName := "White"
+						if pos.Turn() == chess.Black {
+							colorName = "Black"
+						}
+						speak(voiceSelect.Selected, moveCommentary(colorName, move, pos, true))
+					}
+				}
+				queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug, speakFn)
 			}
 		}()
 	}
@@ -675,6 +688,15 @@ func main() {
 				isWhiteTurn := prePos.Turn() == chess.White
 				notation := chess.AlgebraicNotation{}.Encode(prePos, bestMove)
 
+				// Voiceover — announce before applying the move
+				if voiceoverCheck.Checked {
+					colorName := "White"
+					if !isWhiteTurn {
+						colorName = "Black"
+					}
+					speak(voiceSelect.Selected, moveCommentary(colorName, bestMove, prePos, true))
+				}
+
 				if applyErr := gs.ApplyMove(bestMove); applyErr != nil {
 					addDebug(fmt.Sprintf("CPU vs CPU apply error: %v", applyErr))
 					return
@@ -697,15 +719,6 @@ func main() {
 					setCpuMoveLabel(fmt.Sprintf("Black moved %s", notation))
 				}
 
-				// Voiceover
-				if voiceoverCheck.Checked {
-					colorName := "White"
-					if !isWhiteTurn {
-						colorName = "Black"
-					}
-					speak(voiceSelect.Selected, moveCommentary(colorName, bestMove, prePos))
-				}
-
 				fyne.Do(func() {
 					fenLabel.SetText("FEN: " + gs.FEN())
 				})
@@ -718,7 +731,7 @@ func main() {
 	buttonRow1 := container.NewGridWithColumns(2, calibrateBtn, startBtn)
 	buttonRow2 := container.NewGridWithColumns(2, viewMovesBtn, cpuVsCpuBtn)
 
-	voiceoverRow := container.NewBorder(nil, nil, voiceoverCheck, nil, voiceSelect)
+	voiceoverRow := container.NewBorder(nil, nil, voiceoverCheck, cpuOnlyCheck, voiceSelect)
 
 	gameControls := container.NewVBox(
 		widget.NewRichTextFromMarkdown("**Difficulty:**"),
@@ -974,14 +987,15 @@ func main() {
 										setCpuMoveLabel(fmt.Sprintf("%s moved %s", cpuColorName(), notation))
 									}
 
-									// Voiceover
-									if voiceoverCheck.Checked {
-										colorName := "White"
-										if prePos.Turn() == chess.Black {
-											colorName = "Black"
-										}
-										speak(voiceSelect.Selected, moveCommentary(colorName, move, prePos))
+									// Voiceover for human moves only (CPU moves are announced
+								// earlier when Stockfish recommends them).
+								if voiceoverCheck.Checked && wasHumanTurn && !cpuOnlyCheck.Checked {
+									colorName := "White"
+									if prePos.Turn() == chess.Black {
+										colorName = "Black"
 									}
+									speak(voiceSelect.Selected, moveCommentary(colorName, move, prePos, false))
+								}
 
 									if gs.IsGameOver() {
 										gameMu.Lock()
@@ -1011,7 +1025,16 @@ func main() {
 											difficulty = 5
 										}
 										depth := difficulty * 2
-										go queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug)
+										speakFn := func(m *chess.Move, p *chess.Position) {
+											if voiceoverCheck.Checked {
+												cn := "White"
+												if p.Turn() == chess.Black {
+													cn = "Black"
+												}
+												speak(voiceSelect.Selected, moveCommentary(cn, m, p, true))
+											}
+										}
+										go queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug, speakFn)
 									}
 								}
 							}
@@ -1246,14 +1269,17 @@ func chessPieceToUI(p chess.Piece) ui.PieceType {
 }
 
 // queryStockfish asks the engine for the best move and updates the UI.
-func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, storeRec func(int, int, int, int), addDebug func(string)) {
+// speakMove is called with the best move and position so the caller can
+// trigger a pre-move voiceover announcement.
+func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, storeRec func(int, int, int, int), addDebug func(string), speakMove func(*chess.Move, *chess.Position)) {
 	bestMove, err := eng.BestMove(gs.Game(), depth)
 	if err != nil {
 		addDebug(fmt.Sprintf("Stockfish error: %v", err))
 		return
 	}
 
-	notation := chess.AlgebraicNotation{}.Encode(gs.Game().Position(), bestMove)
+	pos := gs.Game().Position()
+	notation := chess.AlgebraicNotation{}.Encode(pos, bestMove)
 	addDebug(fmt.Sprintf("Stockfish recommends: %s", notation))
 
 	fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
@@ -1262,6 +1288,10 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColo
 	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
 
 	setCpuLabel(fmt.Sprintf("%s to move %s", cpuColor, notation))
+
+	if speakMove != nil {
+		speakMove(bestMove, pos)
+	}
 }
 
 // availableVoices returns the list of macOS TTS voices by parsing `say -v ?`.
@@ -1327,21 +1357,37 @@ func speak(voice, text string) {
 }
 
 // moveCommentary builds a natural-language phrase describing a chess move.
-func moveCommentary(colorName string, move *chess.Move, pos *chess.Position) string {
+// When preMove is true (CPU announcements), uses future tense: "to move to" / "to take".
+// When preMove is false (human moves already made), uses past tense: "to" / "takes".
+func moveCommentary(colorName string, move *chess.Move, pos *chess.Position, preMove bool) string {
 	piece := pos.Board().Piece(move.S1())
 	dest := squareName(move.S2())
 	name := pieceName(piece)
 
 	if move.HasTag(chess.KingSideCastle) {
+		if preMove {
+			return colorName + " to castle king side"
+		}
 		return colorName + " castles king side"
 	}
 	if move.HasTag(chess.QueenSideCastle) {
+		if preMove {
+			return colorName + " to castle queen side"
+		}
 		return colorName + " castles queen side"
 	}
 
-	verb := "to"
-	if move.HasTag(chess.Capture) || move.HasTag(chess.EnPassant) {
-		verb = "takes"
+	var verb string
+	if preMove {
+		verb = "to move to"
+		if move.HasTag(chess.Capture) || move.HasTag(chess.EnPassant) {
+			verb = "to take"
+		}
+	} else {
+		verb = "to"
+		if move.HasTag(chess.Capture) || move.HasTag(chess.EnPassant) {
+			verb = "takes"
+		}
 	}
 
 	text := fmt.Sprintf("%s %s %s %s", colorName, name, verb, dest)
