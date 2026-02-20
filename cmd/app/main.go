@@ -341,21 +341,30 @@ func main() {
 	var invalidSoundStop chan struct{}
 
 	// Track last Stockfish recommendation so we can restore highlights
-	// after an invalid-move correction.
+	// after an invalid-move correction, and enforce the CPU move.
 	var recMu sync.Mutex
 	var recFromRow, recFromCol, recToRow, recToCol int
+	var recMove *chess.Move
 	recActive := false
 
-	storeRecommendation := func(fR, fC, tR, tC int) {
+	storeRecommendation := func(fR, fC, tR, tC int, move *chess.Move) {
 		recMu.Lock()
 		recFromRow, recFromCol, recToRow, recToCol = fR, fC, tR, tC
+		recMove = move
 		recActive = true
 		recMu.Unlock()
 	}
 	clearRecommendation := func() {
 		recMu.Lock()
 		recActive = false
+		recMove = nil
 		recMu.Unlock()
+	}
+	getRecommendedMove := func() *chess.Move {
+		recMu.Lock()
+		m := recMove
+		recMu.Unlock()
+		return m
 	}
 	restoreRecommendation := func() {
 		recMu.Lock()
@@ -392,11 +401,12 @@ func main() {
 	// Voiceover controls
 	voices := availableVoices()
 	voiceoverCheck := widget.NewCheck("Voiceover", nil)
+	voiceoverCheck.SetChecked(true) // enabled by default
 	voiceSelect := widget.NewSelect(voices, nil)
 	defaultVoice := voices[0]
 	for _, v := range voices {
-		if v == "Samantha" {
-			defaultVoice = "Samantha"
+		if v == "Daniel" {
+			defaultVoice = "Daniel"
 			break
 		}
 	}
@@ -429,7 +439,10 @@ func main() {
 		gameState = nil
 		stableDiffCount = 0
 		settling = false
-		invalidMoveActive = false
+		if invalidMoveActive {
+			close(invalidSoundStop)
+			invalidMoveActive = false
+		}
 		gameMu.Unlock()
 
 		clearRecommendation()
@@ -940,7 +953,27 @@ func main() {
 							settling = false
 							fyne.Do(func() { thinkingLabel.Hide() })
 
-							move, inferErr := gs.InferMove(occupancy)
+							var move *chess.Move
+							var inferErr error
+
+							if gs.IsHumanTurn() {
+								// Human's turn — infer from all legal moves
+								move, inferErr = gs.InferMove(occupancy)
+							} else if rec := getRecommendedMove(); rec != nil {
+								// CPU's turn — verify the board matches the
+								// recommended move's occupancy directly, avoiding
+								// ambiguity when multiple captures produce the
+								// same occupancy grid.
+								if occupancy == gs.OccupancyAfterMove(rec) {
+									move = rec
+								} else {
+									inferErr = fmt.Errorf("board does not match recommended move %s", rec)
+								}
+							} else {
+								// CPU's turn but no recommendation yet — fallback
+								move, inferErr = gs.InferMove(occupancy)
+							}
+
 							if inferErr != nil {
 								// Invalid move — flash differing squares and play alert
 								if !invalidMoveActive {
@@ -948,10 +981,14 @@ func main() {
 									addDebug(fmt.Sprintf("Invalid move detected: %v", inferErr))
 									setStatus("Invalid move! Please correct the board.")
 									invalidSoundStop = make(chan struct{})
-									go invalidMoveAlertLoop(invalidSoundStop)
+									go invalidMoveAlertLoop(invalidSoundStop, nil)
 								}
 								diffs := diffSquares(expected, occupancy)
 								boardWidget.FlashInvalid(diffs)
+								// Announce every time squares flash red
+								if voiceoverCheck.Checked {
+									speak(voiceSelect.Selected, "Invalid move")
+								}
 							} else {
 								// Valid move — clear any invalid state
 								if invalidMoveActive {
@@ -988,14 +1025,14 @@ func main() {
 									}
 
 									// Voiceover for human moves only (CPU moves are announced
-								// earlier when Stockfish recommends them).
-								if voiceoverCheck.Checked && wasHumanTurn && !cpuOnlyCheck.Checked {
-									colorName := "White"
-									if prePos.Turn() == chess.Black {
-										colorName = "Black"
+									// earlier when Stockfish recommends them).
+									if voiceoverCheck.Checked && wasHumanTurn && !cpuOnlyCheck.Checked {
+										colorName := "White"
+										if prePos.Turn() == chess.Black {
+											colorName = "Black"
+										}
+										speak(voiceSelect.Selected, moveCommentary(colorName, move, prePos, false))
 									}
-									speak(voiceSelect.Selected, moveCommentary(colorName, move, prePos, false))
-								}
 
 									if gs.IsGameOver() {
 										gameMu.Lock()
@@ -1205,9 +1242,13 @@ func diffSquares(expected, observed [8][8]bool) [][2]int {
 }
 
 // invalidMoveAlertLoop plays an alert sound immediately, then every 4 seconds,
-// until the stop channel is closed.
-func invalidMoveAlertLoop(stop <-chan struct{}) {
+// until the stop channel is closed. afterFirstAlert (if non-nil) is called once
+// after the first sound finishes — used for voiceover announcements.
+func invalidMoveAlertLoop(stop <-chan struct{}, afterFirstAlert func()) {
 	playAlertSound()
+	if afterFirstAlert != nil {
+		afterFirstAlert()
+	}
 	ticker := time.NewTicker(4 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1271,7 +1312,7 @@ func chessPieceToUI(p chess.Piece) ui.PieceType {
 // queryStockfish asks the engine for the best move and updates the UI.
 // speakMove is called with the best move and position so the caller can
 // trigger a pre-move voiceover announcement.
-func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, storeRec func(int, int, int, int), addDebug func(string), speakMove func(*chess.Move, *chess.Position)) {
+func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColor string, setCpuLabel func(string), boardWidget *ui.BoardWidget, storeRec func(int, int, int, int, *chess.Move), addDebug func(string), speakMove func(*chess.Move, *chess.Position)) {
 	bestMove, err := eng.BestMove(gs.Game(), depth)
 	if err != nil {
 		addDebug(fmt.Sprintf("Stockfish error: %v", err))
@@ -1284,7 +1325,7 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColo
 
 	fromRow, fromCol := nchess.RowColFromSquare(bestMove.S1())
 	toRow, toCol := nchess.RowColFromSquare(bestMove.S2())
-	storeRec(fromRow, fromCol, toRow, toCol)
+	storeRec(fromRow, fromCol, toRow, toCol, bestMove)
 	boardWidget.HighlightMove(fromRow, fromCol, toRow, toCol)
 
 	setCpuLabel(fmt.Sprintf("%s to move %s", cpuColor, notation))
@@ -1298,7 +1339,7 @@ func queryStockfish(gs *nchess.GameState, eng *engine.Engine, depth int, cpuColo
 func availableVoices() []string {
 	out, err := exec.Command("say", "-v", "?").Output()
 	if err != nil {
-		return []string{"Samantha"}
+		return []string{"Daniel"}
 	}
 	var voices []string
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
@@ -1311,7 +1352,7 @@ func availableVoices() []string {
 		}
 	}
 	if len(voices) == 0 {
-		return []string{"Samantha"}
+		return []string{"Daniel"}
 	}
 	return voices
 }

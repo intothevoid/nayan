@@ -141,6 +141,13 @@ func (gs *GameState) InferMove(observed [8][8]bool) (*chess.Move, error) {
 	return matches[0], nil
 }
 
+// OccupancyAfterMove returns the occupancy grid that would result from
+// applying the given move to the current position, without mutating the game.
+func (gs *GameState) OccupancyAfterMove(m *chess.Move) [8][8]bool {
+	simPos := gs.game.Position().Update(m)
+	return occupancyFromBoard(simPos.Board())
+}
+
 // ApplyMove applies a move to the game state.
 func (gs *GameState) ApplyMove(m *chess.Move) error {
 	return gs.game.Move(m)
