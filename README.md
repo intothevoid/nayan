@@ -4,9 +4,13 @@
 
 A chess companion that uses a webcam mounted above a physical chessboard to detect the board and pieces via OpenCV, then recommends moves using a local Stockfish engine. Built with Go as a learning exercise for GoCV/OpenCV.
 
-![Nayan UI](docs/nayan-ui.gif)
+![Nayan User Interface](docs/nayan-ui.png)
 
 ## Features
+
+Some of the features of Nayan have been listed below and can be seen in action in the screencast below -
+
+![Nayan User Interface Video](docs/nayan-ui.gif)
 
 - **Board detection** — Manual corner calibration with click-to-select, perspective-warps to a top-down 800x800 view
 - **Piece detection** — Detects occupied vs empty squares using variance and edge detection against a calibration reference
