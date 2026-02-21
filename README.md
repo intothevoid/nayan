@@ -4,7 +4,7 @@
 
 A chess companion that uses a webcam mounted above a physical chessboard to detect the board and pieces via OpenCV, then recommends moves using a local Stockfish engine. Built with Go as a learning exercise for GoCV/OpenCV.
 
-![Nayan UI](docs/ui.jpg)
+![Nayan UI](docs/nayan-ui.gif)
 
 ## Features
 
