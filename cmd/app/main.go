@@ -357,6 +357,7 @@ func main() {
 	var recFromRow, recFromCol, recToRow, recToCol int
 	var recMove *chess.Move
 	recActive := false
+	var recRepeatStop chan struct{} // stops the voiceover repeat goroutine
 
 	storeRecommendation := func(fR, fC, tR, tC int, move *chess.Move) {
 		recMu.Lock()
@@ -369,6 +370,10 @@ func main() {
 		recMu.Lock()
 		recActive = false
 		recMove = nil
+		if recRepeatStop != nil {
+			close(recRepeatStop)
+			recRepeatStop = nil
+		}
 		recMu.Unlock()
 	}
 	getRecommendedMove := func() *chess.Move {
@@ -567,7 +572,30 @@ func main() {
 						if pos.Turn() == chess.Black {
 							colorName = "Black"
 						}
-						speak(voiceSelect.Selected, moveCommentary(colorName, move, pos, true))
+						text := moveCommentary(colorName, move, pos, true)
+						speak(voiceSelect.Selected, text)
+						// Repeat the recommendation every 10 seconds
+						recMu.Lock()
+						if recRepeatStop != nil {
+							close(recRepeatStop)
+						}
+						stop := make(chan struct{})
+						recRepeatStop = stop
+						recMu.Unlock()
+						go func() {
+							ticker := time.NewTicker(10 * time.Second)
+							defer ticker.Stop()
+							for {
+								select {
+								case <-stop:
+									return
+								case <-ticker.C:
+									if voiceoverCheck.Checked {
+										speak(voiceSelect.Selected, text)
+									}
+								}
+							}
+						}()
 					}
 				}
 				queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug, speakFn)
@@ -1079,7 +1107,30 @@ func main() {
 												if p.Turn() == chess.Black {
 													cn = "Black"
 												}
-												speak(voiceSelect.Selected, moveCommentary(cn, m, p, true))
+												text := moveCommentary(cn, m, p, true)
+												speak(voiceSelect.Selected, text)
+												// Repeat the recommendation every 10 seconds
+												recMu.Lock()
+												if recRepeatStop != nil {
+													close(recRepeatStop)
+												}
+												stop := make(chan struct{})
+												recRepeatStop = stop
+												recMu.Unlock()
+												go func() {
+													ticker := time.NewTicker(10 * time.Second)
+													defer ticker.Stop()
+													for {
+														select {
+														case <-stop:
+															return
+														case <-ticker.C:
+															if voiceoverCheck.Checked {
+																speak(voiceSelect.Selected, text)
+															}
+														}
+													}
+												}()
 											}
 										}
 										go queryStockfish(gs, eng, depth, cpuColorName(), setCpuMoveLabel, boardWidget, storeRecommendation, addDebug, speakFn)
