@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +63,12 @@ const stabilityThreshold = 5
 // Corner labels in selection order
 var cornerNames = [4]string{"top-left", "top-right", "bottom-right", "bottom-left"}
 
+// Embedded alert sound (played via afplay from a temp file).
+//
+//go:embed Funk.aiff
+var alertSoundData []byte
+var alertSoundPath string
+
 // speak state — protected by speakMu so a new utterance kills any in-progress one.
 var (
 	speakMu  sync.Mutex
@@ -112,6 +121,8 @@ func (l *fixedHeightLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) 
 }
 
 func main() {
+	initAlertSound()
+
 	// 1. Setup the Fyne UI App
 	myApp := app.New()
 	window := myApp.NewWindow("Nayan - OpenCV Chess Companion")
@@ -1261,9 +1272,20 @@ func invalidMoveAlertLoop(stop <-chan struct{}, afterFirstAlert func()) {
 	}
 }
 
-// playAlertSound plays a system alert sound (macOS).
+// initAlertSound writes the embedded sound to a temp file so afplay can use it.
+func initAlertSound() {
+	dir := os.TempDir()
+	path := filepath.Join(dir, "nayan-alert.aiff")
+	if err := os.WriteFile(path, alertSoundData, 0644); err != nil {
+		// Fallback to system sound if temp write fails
+		path = "/System/Library/Sounds/Funk.aiff"
+	}
+	alertSoundPath = path
+}
+
+// playAlertSound plays the embedded alert sound (macOS).
 func playAlertSound() {
-	exec.Command("afplay", "/System/Library/Sounds/Funk.aiff").Run()
+	exec.Command("afplay", alertSoundPath).Run()
 }
 
 // pieceGridToUI converts a chess.Piece grid from GameState to ui.PieceType grid.
