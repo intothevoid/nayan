@@ -141,6 +141,77 @@ func (gs *GameState) InferMove(observed [8][8]bool) (*chess.Move, error) {
 	return matches[0], nil
 }
 
+// InferMoveWithColor works like InferMove but uses per-square brightness
+// values to disambiguate when multiple legal moves produce the same occupancy
+// grid (e.g. a piece that can capture on two different squares).
+//
+// Strategy: for each candidate move, the destination square should contain
+// the moving piece. White pieces are brighter than black pieces, so the
+// candidate whose destination brightness best matches the piece colour wins.
+func (gs *GameState) InferMoveWithColor(observed [8][8]bool, brightness [8][8]float64) (*chess.Move, error) {
+	pos := gs.game.Position()
+	validMoves := pos.ValidMoves()
+
+	var matches []*chess.Move
+	for _, move := range validMoves {
+		simPos := pos.Update(move)
+		simOcc := occupancyFromBoard(simPos.Board())
+		if simOcc == observed {
+			matches = append(matches, move)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no legal move matches the observed board state")
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+
+	// Collapse promotion duplicates (same S1+S2, prefer queen).
+	type moveKey struct{ s1, s2 chess.Square }
+	best := make(map[moveKey]*chess.Move)
+	for _, m := range matches {
+		key := moveKey{m.S1(), m.S2()}
+		if _, ok := best[key]; !ok || m.Promo() == chess.Queen {
+			best[key] = m
+		}
+	}
+	if len(best) == 1 {
+		for _, m := range best {
+			return m, nil
+		}
+	}
+
+	// Multiple distinct destinations — disambiguate using piece colour.
+	// The moving piece's colour is known from the game state. A white
+	// piece produces a brighter square than a black piece, so we pick
+	// the candidate whose destination brightness is highest (for a white
+	// mover) or lowest (for a black mover).
+	board := pos.Board()
+	var bestMove *chess.Move
+	bestScore := -1.0
+
+	for _, m := range best {
+		piece := board.Piece(m.S1())
+		destRow, destCol := RowColFromSquare(m.S2())
+		b := brightness[destRow][destCol]
+
+		// White pieces → higher brightness scores better.
+		// Black pieces → lower brightness (inverted) scores better.
+		score := b
+		if piece.Color() == chess.Black {
+			score = 255 - b
+		}
+		if score > bestScore {
+			bestScore = score
+			bestMove = m
+		}
+	}
+
+	return bestMove, nil
+}
+
 // OccupancyAfterMove returns the occupancy grid that would result from
 // applying the given move to the current position, without mutating the game.
 func (gs *GameState) OccupancyAfterMove(m *chess.Move) [8][8]bool {

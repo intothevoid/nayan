@@ -114,9 +114,9 @@ const (
 
 	// absEdgeThreshold is the minimum percentage of edge pixels in a square
 	// ROI to consider occupied. With CLAHE, occupied squares typically have
-	// 7-14% edges. Set to 6.0 to reject wood grain/shadow edge noise
-	// (e.g. b6 reads ~5%) while catching pieces via combined threshold.
-	absEdgeThreshold = 6.0
+	// 7-14% edges. Set to 7.0 to reject wood grain/shadow edge noise
+	// (e.g. b4 fluctuates at 5-6%) while catching pieces via combined threshold.
+	absEdgeThreshold = 7.0
 
 	// Combined thresholds: if BOTH signals are moderately above these lower
 	// minimums, consider occupied. Catches dark pieces on dark squares
@@ -281,6 +281,32 @@ func FormatMetrics(metrics [64]SquareMetrics) string {
 	s += fmt.Sprintf("Thresholds: var>%.0f edge>%.1f%%  Legend: X=occupied .=empty !=borderline\n",
 		absVarianceThreshold, absEdgeThreshold)
 	return s
+}
+
+// ScanBrightness returns the mean greyscale brightness (0-255) of the center
+// region of each square. Used to distinguish white pieces from black pieces
+// when occupancy-based move inference is ambiguous.
+func ScanBrightness(warped gocv.Mat) [8][8]float64 {
+	var brightness [8][8]float64
+
+	grey := gocv.NewMat()
+	defer grey.Close()
+	gocv.CvtColor(warped, &grey, gocv.ColorBGRToGray)
+
+	mean := gocv.NewMat()
+	defer mean.Close()
+	stddev := gocv.NewMat()
+	defer stddev.Close()
+
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			roi := GetSquare(grey, col, row)
+			gocv.MeanStdDev(roi, &mean, &stddev)
+			brightness[row][col] = mean.GetDoubleAt(0, 0)
+			roi.Close()
+		}
+	}
+	return brightness
 }
 
 // DrawOccupancy draws a semi-transparent green rectangle on each occupied square.

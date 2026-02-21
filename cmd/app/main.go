@@ -940,6 +940,7 @@ func main() {
 
 				// Detect pieces using variance-based detection (no reference needed)
 				occupancy, metrics := vision.ScanBoardDebug(warpedMat)
+				brightness := vision.ScanBrightness(warpedMat)
 				vision.DrawOccupancy(&warpedMat, occupancy)
 
 				if occupancy != lastOccupancy {
@@ -996,8 +997,9 @@ func main() {
 							var inferErr error
 
 							if gs.IsHumanTurn() {
-								// Human's turn — infer from all legal moves
-								move, inferErr = gs.InferMove(occupancy)
+								// Human's turn — infer using brightness to
+								// disambiguate when multiple captures match.
+								move, inferErr = gs.InferMoveWithColor(occupancy, brightness)
 							} else if rec := getRecommendedMove(); rec != nil {
 								// CPU's turn — verify the board matches the
 								// recommended move's occupancy directly, avoiding
@@ -1010,7 +1012,7 @@ func main() {
 								}
 							} else {
 								// CPU's turn but no recommendation yet — fallback
-								move, inferErr = gs.InferMove(occupancy)
+								move, inferErr = gs.InferMoveWithColor(occupancy, brightness)
 							}
 
 							if inferErr != nil {

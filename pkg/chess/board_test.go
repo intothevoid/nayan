@@ -148,3 +148,63 @@ func TestInferMoveCastle(t *testing.T) {
 		t.Errorf("expected kingside castle, got %s%s", move.S1(), move.S2())
 	}
 }
+
+func TestInferMoveWithColorDisambiguates(t *testing.T) {
+	// Set up a position where a white queen on e2 can capture a black pawn
+	// on e5 OR a black knight on h5 — both produce the same occupancy.
+	// FEN: rnbqkb1r/pppp1ppp/8/4p2n/8/8/PPPPQPPP/RNB1KBNR w KQkq - 2 3
+	fen, _ := chess.FEN("rnbqkb1r/pppp1ppp/8/4p2n/8/8/PPPPQPPP/RNB1KBNR w KQkq - 2 3")
+	game := chess.NewGame(fen)
+	gs := &GameState{game: game, HumanColor: White}
+
+	// Simulate Qxe5: queen leaves e2, captures pawn on e5.
+	// e2 empty, e5 occupied (queen), h5 occupied (knight) — same occupancy as Qxh5!
+	observed := gs.ExpectedOccupancy()
+	observed[6][4] = false // e2 vacated (row=6 for rank 2)
+
+	// Verify ambiguity: plain InferMove returns *some* match but may be wrong
+	_, err := gs.InferMove(observed)
+	if err != nil {
+		t.Fatalf("InferMove failed (should find at least one match): %v", err)
+	}
+
+	// Now use brightness to disambiguate. The white queen is on e5,
+	// so e5 should be brighter than h5 (which has a black knight).
+	var brightness [8][8]float64
+	// e5 = row 3, col 4 — white queen (bright)
+	brightness[3][4] = 180.0
+	// h5 = row 3, col 7 — black knight (dark)
+	brightness[3][7] = 80.0
+
+	move, err := gs.InferMoveWithColor(observed, brightness)
+	if err != nil {
+		t.Fatalf("InferMoveWithColor failed: %v", err)
+	}
+
+	// Should pick Qxe5 (e2→e5), not Qxh5 (e2→h5)
+	if move.S1() != chess.E2 || move.S2() != chess.E5 {
+		t.Errorf("expected Qxe5 (e2e5), got %s%s", move.S1(), move.S2())
+	}
+}
+
+func TestInferMoveWithColorUnambiguous(t *testing.T) {
+	// Verify InferMoveWithColor works for a normal unambiguous move.
+	// Standard opening: 1. e4
+	gs := NewGame(White)
+
+	observed := gs.ExpectedOccupancy()
+	observed[6][4] = false // e2 vacated
+	observed[4][4] = true  // e4 occupied
+
+	var brightness [8][8]float64
+	brightness[4][4] = 170.0 // e4 — white pawn (bright)
+
+	move, err := gs.InferMoveWithColor(observed, brightness)
+	if err != nil {
+		t.Fatalf("InferMoveWithColor failed: %v", err)
+	}
+
+	if move.S1() != chess.E2 || move.S2() != chess.E4 {
+		t.Errorf("expected e2e4, got %s%s", move.S1(), move.S2())
+	}
+}
