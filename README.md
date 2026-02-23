@@ -88,6 +88,7 @@ pkg/vision/
 - [Fyne](https://fyne.io/) — Cross-platform GUI toolkit
 - [notnil/chess](https://github.com/notnil/chess) — Chess game logic, move generation, FEN, UCI
 - [Stockfish](https://stockfishchess.org/) — Chess engine for move recommendations
+- [Wikimedia Chess Pieces SVG](https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces) - Wikimedia chess pieces svg files used for creating the virtual chessboard
 
 ## License
 
